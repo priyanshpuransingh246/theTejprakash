@@ -249,3 +249,52 @@ body,
     bottom: 22px;
   }
 }
+
+/* =========================================================
+   The Tejprakash — Interior Smoked-Glass & Optical Scan Animations
+   ========================================================= */
+@keyframes tejScanBeam {
+  0% {
+    top: 4%;
+    opacity: 0.15;
+  }
+  50% {
+    top: 92%;
+    opacity: 0.85;
+  }
+  100% {
+    top: 4%;
+    opacity: 0.15;
+  }
+}
+
+@keyframes tejSheenSweep {
+  0% {
+    transform: translateX(-120%) skewX(-24deg);
+  }
+  50%, 100% {
+    transform: translateX(220%) skewX(-24deg);
+  }
+}
+
+@keyframes tejFloatCard {
+  0%, 100% {
+    transform: translateY(0px);
+  }
+  50% {
+    transform: translateY(-4px);
+  }
+}
+
+.tej-scan-beam {
+  animation: tejScanBeam 3.8s ease-in-out infinite;
+}
+
+.tej-sheen-sweep {
+  animation: tejSheenSweep 5.5s ease-in-out infinite;
+}
+
+.tej-float-card {
+  animation: tejFloatCard 4.6s ease-in-out infinite;
+}
+

@@ -281,9 +281,12 @@ export const TejprakashWorkspace: React.FC<TejprakashWorkspaceProps> = ({
 
   useEffect(() => {
     if (!visible) return;
-    if (role === 'camera' && !localCameraActive) {
-      startLocalCamera(facingMode);
-    }
+    const timer = window.setTimeout(() => {
+      if (role === 'camera' && !localCameraActive) {
+        startLocalCamera(facingMode);
+      }
+    }, 920);
+    return () => window.clearTimeout(timer);
   }, [visible, role, localCameraActive, facingMode, startLocalCamera]);
 
   useEffect(() => {
@@ -389,81 +392,87 @@ export const TejprakashWorkspace: React.FC<TejprakashWorkspaceProps> = ({
       }
     };
 
-    connectWs();
-
-    const peerId =
-      role === 'controller'
-        ? `tejprakash-ctrl-${roomId.toLowerCase()}`
-        : `tejprakash-cam-${roomId.toLowerCase()}-${Math.floor(1000 + Math.random() * 9000)}`;
-
     let peer: Peer | null = null;
     let peerRetryTimer: number | null = null;
-    try {
-      peer = new Peer(peerId);
-      peerRef.current = peer;
 
-      const tryConnectPeerToController = () => {
-        if (unmounted || role !== 'camera' || !peer || peer.disconnected || peer.destroyed) return;
-        const targetCtrlId = `tejprakash-ctrl-${roomId.toLowerCase()}`;
-        if (!peerConnRef.current || !peerConnRef.current.open) {
-          try {
-            const conn = peer.connect(targetCtrlId, { reliable: false });
-            peerConnRef.current = conn;
-          } catch {
-            // Retry on next tick
+    const initNetworkTimer = window.setTimeout(() => {
+      if (unmounted) return;
+      connectWs();
+
+      const peerId =
+        role === 'controller'
+          ? `tejprakash-ctrl-${roomId.toLowerCase()}`
+          : `tejprakash-cam-${roomId.toLowerCase()}-${Math.floor(1000 + Math.random() * 9000)}`;
+
+      try {
+        peer = new Peer(peerId);
+        peerRef.current = peer;
+
+        const tryConnectPeerToController = () => {
+          if (unmounted || role !== 'camera' || !peer || peer.disconnected || peer.destroyed)
+            return;
+          const targetCtrlId = `tejprakash-ctrl-${roomId.toLowerCase()}`;
+          if (!peerConnRef.current || !peerConnRef.current.open) {
+            try {
+              const conn = peer.connect(targetCtrlId, { reliable: false });
+              peerConnRef.current = conn;
+            } catch {
+              // Retry on next tick
+            }
           }
-        }
-        if (mediaStreamRef.current && (!mediaCallRef.current || !mediaCallRef.current.open)) {
-          try {
-            mediaCallRef.current = peer.call(targetCtrlId, mediaStreamRef.current);
-          } catch {
-            // Retry on next tick
+          if (mediaStreamRef.current && (!mediaCallRef.current || !mediaCallRef.current.open)) {
+            try {
+              mediaCallRef.current = peer.call(targetCtrlId, mediaStreamRef.current);
+            } catch {
+              // Retry on next tick
+            }
           }
-        }
-      };
+        };
 
-      peer.on('open', () => {
-        if (role === 'camera') {
-          tryConnectPeerToController();
-          peerRetryTimer = window.setInterval(tryConnectPeerToController, 3000);
-        }
-      });
-
-      peer.on('connection', (conn) => {
-        peerConnRef.current = conn;
-        conn.on('data', (raw: unknown) => {
-          const data = raw as {
-            type?: string;
-            frameDataUrl?: string;
-            personCount?: number;
-            boxes?: DetectedPersonBox[];
-          };
-          if (data && data.type === 'camera:frame' && role === 'controller') {
-            if (data.frameDataUrl) setRemoteFrameUrl(data.frameDataUrl);
-            setRemoteCameraOnline(true);
-            if (typeof data.personCount === 'number') setRawDetectedCount(data.personCount);
-            if (Array.isArray(data.boxes)) setDetectedBoxes(data.boxes);
+        peer.on('open', () => {
+          if (role === 'camera') {
+            tryConnectPeerToController();
+            peerRetryTimer = window.setInterval(tryConnectPeerToController, 3000);
           }
         });
-      });
 
-      peer.on('call', (call) => {
-        call.answer();
-        call.on('stream', (remoteStream) => {
-          if (remoteVideoRef.current) {
-            remoteVideoRef.current.srcObject = remoteStream;
-            remoteVideoRef.current.play().catch(() => {});
-            setRemoteStreamActive(true);
-            setRemoteCameraOnline(true);
-          }
+        peer.on('connection', (conn) => {
+          peerConnRef.current = conn;
+          conn.on('data', (raw: unknown) => {
+            const data = raw as {
+              type?: string;
+              frameDataUrl?: string;
+              personCount?: number;
+              boxes?: DetectedPersonBox[];
+            };
+            if (data && data.type === 'camera:frame' && role === 'controller') {
+              if (data.frameDataUrl) setRemoteFrameUrl(data.frameDataUrl);
+              setRemoteCameraOnline(true);
+              if (typeof data.personCount === 'number') setRawDetectedCount(data.personCount);
+              if (Array.isArray(data.boxes)) setDetectedBoxes(data.boxes);
+            }
+          });
         });
-      });
-    } catch {
-      // PeerJS optional fallback
-    }
+
+        peer.on('call', (call) => {
+          call.answer();
+          call.on('stream', (remoteStream) => {
+            if (remoteVideoRef.current) {
+              remoteVideoRef.current.srcObject = remoteStream;
+              remoteVideoRef.current.play().catch(() => {});
+              setRemoteStreamActive(true);
+              setRemoteCameraOnline(true);
+            }
+          });
+        });
+      } catch {
+        // PeerJS optional fallback
+      }
+    }, 900);
 
     return () => {
       unmounted = true;
+      window.clearTimeout(initNetworkTimer);
       if (reconnectTimer !== null) window.clearTimeout(reconnectTimer);
       if (peerRetryTimer !== null) window.clearInterval(peerRetryTimer);
       ws?.close();
@@ -723,20 +732,82 @@ export const TejprakashWorkspace: React.FC<TejprakashWorkspaceProps> = ({
     setPwdChangeSuccess('Controller password updated successfully!');
   };
 
+  const workspaceRootRef = useRef<HTMLDivElement | null>(null);
+  const workspaceStageRef = useRef<HTMLDivElement | null>(null);
+
   if (!visible) return null;
 
   const hasAnyVideoFeed = localCameraActive || remoteStreamActive || Boolean(remoteFrameUrl);
 
+  const renderAnimatedTurbine = (speed: number, accentHex: string) => {
+    const isSpinning = speed > 0;
+    const duration = speed >= 100 ? '0.42s' : speed > 0 ? '0.92s' : '6.5s';
+    return (
+      <div className="relative w-9 h-9 flex items-center justify-center shrink-0">
+        {isSpinning && (
+          <span
+            className="absolute inset-0 rounded-full animate-ping opacity-25"
+            style={{ backgroundColor: accentHex }}
+          />
+        )}
+        <svg
+          viewBox="0 0 36 36"
+          className={`w-8 h-8 rounded-full border border-white/15 p-1 animate-spin ${
+            isSpinning ? 'opacity-100' : 'opacity-45'
+          }`}
+          style={{
+            animationDuration: duration,
+            color: isSpinning ? accentHex : '#b9aee8',
+          }}
+        >
+          <circle cx="18" cy="18" r="3.2" fill="currentColor" />
+          <path
+            d="M18 4 C22 4, 23 11, 18 14 C15 11, 15 6, 18 4 Z"
+            fill="currentColor"
+          />
+          <path
+            d="M32 18 C32 22, 25 23, 22 18 C25 15, 30 15, 32 18 Z"
+            fill="currentColor"
+          />
+          <path
+            d="M18 32 C14 32, 13 25, 18 22 C21 25, 21 30, 18 32 Z"
+            fill="currentColor"
+          />
+          <path
+            d="M4 18 C4 14, 11 13, 14 18 C11 21, 6 21, 4 18 Z"
+            fill="currentColor"
+          />
+        </svg>
+      </div>
+    );
+  };
+
   return (
     <div
+      ref={workspaceRootRef}
       data-testid="tejprakash-workspace"
-      className="fixed inset-0 z-30 bg-[#050507] text-[#ededf0] overflow-y-auto select-text font-sans"
+      onPointerMove={(e) => {
+        const w = window.innerWidth || 1440;
+        const h = window.innerHeight || 960;
+        const nx = (e.clientX / w - 0.5) * 2;
+        const ny = (e.clientY / h - 0.5) * 2;
+        if (workspaceRootRef.current) {
+          workspaceRootRef.current.style.backgroundImage = `radial-gradient(560px circle at ${e.clientX}px ${e.clientY}px, rgba(185, 174, 232, 0.11), rgba(54, 214, 126, 0.05) 42%, transparent 75%), radial-gradient(circle at 50% 50%, rgba(5, 5, 7, 0.52) 0%, rgba(5, 5, 7, 0.14) 68%, transparent 100%)`;
+        }
+        if (workspaceStageRef.current) {
+          workspaceStageRef.current.style.transform = `perspective(1600px) rotateX(${(-ny * 1.15).toFixed(2)}deg) rotateY(${(nx * 1.35).toFixed(2)}deg)`;
+        }
+      }}
+      className="fixed inset-0 z-30 bg-transparent text-[#ededf0] overflow-y-auto select-text font-sans"
       style={{
         backgroundImage:
-          'radial-gradient(circle at 18% 12%, rgba(219, 232, 255, 0.07) 0%, transparent 48%), radial-gradient(circle at 82% 85%, rgba(185, 174, 232, 0.08) 0%, transparent 52%)',
+          'radial-gradient(560px circle at 50% 50%, rgba(185, 174, 232, 0.10), rgba(54, 214, 126, 0.05) 42%, transparent 75%), radial-gradient(circle at 50% 50%, rgba(5, 5, 7, 0.52) 0%, rgba(5, 5, 7, 0.14) 68%, transparent 100%)',
       }}
     >
-      <div className="max-w-[1540px] mx-auto px-4 sm:px-8 py-5 sm:py-7 space-y-4 sm:space-y-5">
+      <div
+        ref={workspaceStageRef}
+        className="max-w-[1220px] mx-auto px-6 sm:px-14 py-6 sm:py-8 space-y-4 sm:space-y-5 transition-transform duration-150 ease-out will-change-transform"
+      >
         {/* ====================================================================
          * TOP SMOKED-GLASS NAV SLAB (Mirrors the Landing Hero's Nav Slab)
          * ==================================================================== */}
@@ -875,6 +946,21 @@ export const TejprakashWorkspace: React.FC<TejprakashWorkspaceProps> = ({
 
               {/* Camera Viewport inside Recessed Glass Frame */}
               <div className="relative w-full aspect-video rounded-[16px] overflow-hidden bg-[#050507] border border-white/[0.12] shadow-[inset_0_2px_20px_rgba(0,0,0,0.9)] flex items-center justify-center">
+                {/* Ambient Optical Grid, Sweeping Laser Beam & Corner Reticles */}
+                <div
+                  className="pointer-events-none absolute inset-0 opacity-20"
+                  style={{
+                    backgroundImage:
+                      'linear-gradient(to right, rgba(255,255,255,0.06) 1px, transparent 1px), linear-gradient(to bottom, rgba(255,255,255,0.06) 1px, transparent 1px)',
+                    backgroundSize: '36px 36px',
+                  }}
+                />
+                <div className="tej-scan-beam pointer-events-none absolute inset-x-0 h-[2px] bg-gradient-to-r from-transparent via-[#36d67e]/75 to-transparent shadow-[0_0_16px_rgba(54,214,126,0.75)]" />
+                <div className="pointer-events-none absolute top-3 left-3 w-4 h-4 border-t-2 border-l-2 border-[#36d67e]/50 rounded-tl-[4px]" />
+                <div className="pointer-events-none absolute top-3 right-3 w-4 h-4 border-t-2 border-r-2 border-[#36d67e]/50 rounded-tr-[4px]" />
+                <div className="pointer-events-none absolute bottom-3 left-3 w-4 h-4 border-b-2 border-l-2 border-[#36d67e]/50 rounded-bl-[4px]" />
+                <div className="pointer-events-none absolute bottom-3 right-3 w-4 h-4 border-b-2 border-r-2 border-[#36d67e]/50 rounded-br-[4px]" />
+
                 <video
                   ref={localVideoRef}
                   playsInline
@@ -890,7 +976,7 @@ export const TejprakashWorkspace: React.FC<TejprakashWorkspaceProps> = ({
                 />
 
                 {!localCameraActive && (
-                  <div className="text-center p-6 max-w-md space-y-3">
+                  <div className="relative z-10 text-center p-6 max-w-md space-y-3">
                     <p className="text-sm text-white/75 font-normal leading-relaxed m-0">
                       Grant camera permission on this device to stream live classroom video and AI occupancy count directly to the Controller.
                     </p>
@@ -940,21 +1026,27 @@ export const TejprakashWorkspace: React.FC<TejprakashWorkspaceProps> = ({
                       : 'Ready'}
                   </span>
                 </div>
-                <div className={`${GLASS_SUBSLAB_CLASS} p-4`}>
-                  <span className="text-[10px] uppercase tracking-[0.18em] text-white/40 block">
-                    FAN 1 · MOTOR 1 (OUT1/OUT2)
-                  </span>
-                  <span className="text-sm font-medium text-[#36d67e] mt-1 block">
-                    {fan1Speed === 0 ? 'OFF (0%)' : `${fan1Speed}% Speed`}
-                  </span>
+                <div className={`${GLASS_SUBSLAB_CLASS} p-4 flex items-center justify-between`}>
+                  <div>
+                    <span className="text-[10px] uppercase tracking-[0.18em] text-white/40 block">
+                      FAN 1 · MOTOR 1 (OUT1/OUT2)
+                    </span>
+                    <span className="text-sm font-medium text-[#36d67e] mt-1 block">
+                      {fan1Speed === 0 ? 'OFF (0%)' : `${fan1Speed}% Speed`}
+                    </span>
+                  </div>
+                  {renderAnimatedTurbine(fan1Speed, '#36d67e')}
                 </div>
-                <div className={`${GLASS_SUBSLAB_CLASS} p-4`}>
-                  <span className="text-[10px] uppercase tracking-[0.18em] text-white/40 block">
-                    FAN 2 · MOTOR 2 (OUT3/OUT4)
-                  </span>
-                  <span className="text-sm font-medium text-[#b9aee8] mt-1 block">
-                    {fan2Speed === 0 ? 'OFF (0%)' : `${fan2Speed}% Speed`}
-                  </span>
+                <div className={`${GLASS_SUBSLAB_CLASS} p-4 flex items-center justify-between`}>
+                  <div>
+                    <span className="text-[10px] uppercase tracking-[0.18em] text-white/40 block">
+                      FAN 2 · MOTOR 2 (OUT3/OUT4)
+                    </span>
+                    <span className="text-sm font-medium text-[#b9aee8] mt-1 block">
+                      {fan2Speed === 0 ? 'OFF (0%)' : `${fan2Speed}% Speed`}
+                    </span>
+                  </div>
+                  {renderAnimatedTurbine(fan2Speed, '#b9aee8')}
                 </div>
               </div>
             </div>
@@ -1047,6 +1139,21 @@ export const TejprakashWorkspace: React.FC<TejprakashWorkspaceProps> = ({
 
                   {/* Video / Remote Stream Stage */}
                   <div className="relative w-full aspect-video rounded-[16px] overflow-hidden bg-[#050507] border border-white/[0.12] shadow-[inset_0_2px_24px_rgba(0,0,0,0.92)] flex items-center justify-center">
+                    {/* Subtle Optical Sensor Grid, Sweeping Laser Beam & Corner Reticles */}
+                    <div
+                      className="pointer-events-none absolute inset-0 opacity-20"
+                      style={{
+                        backgroundImage:
+                          'linear-gradient(to right, rgba(255,255,255,0.06) 1px, transparent 1px), linear-gradient(to bottom, rgba(255,255,255,0.06) 1px, transparent 1px)',
+                        backgroundSize: '36px 36px',
+                      }}
+                    />
+                    <div className="tej-scan-beam pointer-events-none absolute inset-x-0 h-[2px] bg-gradient-to-r from-transparent via-[#36d67e]/75 to-transparent shadow-[0_0_16px_rgba(54,214,126,0.75)]" />
+                    <div className="pointer-events-none absolute top-3 left-3 w-4 h-4 border-t-2 border-l-2 border-[#36d67e]/50 rounded-tl-[4px]" />
+                    <div className="pointer-events-none absolute top-3 right-3 w-4 h-4 border-t-2 border-r-2 border-[#36d67e]/50 rounded-tr-[4px]" />
+                    <div className="pointer-events-none absolute bottom-3 left-3 w-4 h-4 border-b-2 border-l-2 border-[#36d67e]/50 rounded-bl-[4px]" />
+                    <div className="pointer-events-none absolute bottom-3 right-3 w-4 h-4 border-b-2 border-r-2 border-[#36d67e]/50 rounded-br-[4px]" />
+
                     <video
                       ref={localVideoRef}
                       playsInline
@@ -1084,7 +1191,7 @@ export const TejprakashWorkspace: React.FC<TejprakashWorkspaceProps> = ({
                     />
 
                     {!hasAnyVideoFeed && (
-                      <div className="text-center p-6 max-w-md space-y-3.5">
+                      <div className="relative z-10 text-center p-6 max-w-md space-y-3.5">
                         <div className="inline-flex items-center gap-2 px-3.5 py-1 rounded-full bg-white/[0.05] border border-white/[0.12] text-[11px] text-white/70">
                           <span className="w-2 h-2 rounded-full bg-[#b9aee8] animate-ping" />
                           Awaiting Smartphone Camera Node...
@@ -1135,7 +1242,7 @@ export const TejprakashWorkspace: React.FC<TejprakashWorkspaceProps> = ({
                   </div>
                 </div>
 
-                {/* Bottom Smoked-Glass Telemetry Sub-Slabs with Spinning Fan Visualizers */}
+                {/* Bottom Smoked-Glass Telemetry Sub-Slabs with Spinning SVG Turbine Visualizers */}
                 <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 mt-5">
                   <div className={`${GLASS_SUBSLAB_CLASS} p-3.5`}>
                     <span className="text-[10px] uppercase tracking-[0.18em] text-white/40 block">
@@ -1144,6 +1251,12 @@ export const TejprakashWorkspace: React.FC<TejprakashWorkspaceProps> = ({
                     <span className="text-xs font-medium text-white/95 mt-1 block">
                       {controlMode === 'ai' ? 'AI Occupancy' : 'Manual Control'}
                     </span>
+                    <div className="mt-2 h-1 w-full rounded-full bg-white/[0.06] overflow-hidden">
+                      <div
+                        className="h-full bg-gradient-to-r from-[#36d67e] to-[#b9aee8] transition-all duration-300"
+                        style={{ width: controlMode === 'ai' ? '100%' : '55%' }}
+                      />
+                    </div>
                   </div>
 
                   <div className={`${GLASS_SUBSLAB_CLASS} p-3.5 flex items-center justify-between`}>
@@ -1157,18 +1270,14 @@ export const TejprakashWorkspace: React.FC<TejprakashWorkspaceProps> = ({
                       >
                         {fan1Speed === 0 ? 'OFF (0%)' : `${fan1Speed}%`}
                       </span>
+                      <div className="mt-1.5 h-1 w-16 rounded-full bg-white/[0.07] overflow-hidden">
+                        <div
+                          className="h-full bg-[#36d67e] transition-all duration-300"
+                          style={{ width: `${fan1Speed}%` }}
+                        />
+                      </div>
                     </div>
-                    {/* Animated Fan 1 Rotor */}
-                    <div
-                      className={`w-7 h-7 rounded-full border border-white/15 flex items-center justify-center ${
-                        fan1Speed > 0 ? 'animate-spin text-[#36d67e]' : 'text-white/25'
-                      }`}
-                      style={{
-                        animationDuration: fan1Speed >= 100 ? '0.45s' : fan1Speed > 0 ? '0.95s' : '0s',
-                      }}
-                    >
-                      ✦
-                    </div>
+                    {renderAnimatedTurbine(fan1Speed, '#36d67e')}
                   </div>
 
                   <div className={`${GLASS_SUBSLAB_CLASS} p-3.5 flex items-center justify-between`}>
@@ -1182,18 +1291,14 @@ export const TejprakashWorkspace: React.FC<TejprakashWorkspaceProps> = ({
                       >
                         {fan2Speed === 0 ? 'OFF (0%)' : `${fan2Speed}%`}
                       </span>
+                      <div className="mt-1.5 h-1 w-16 rounded-full bg-white/[0.07] overflow-hidden">
+                        <div
+                          className="h-full bg-[#b9aee8] transition-all duration-300"
+                          style={{ width: `${fan2Speed}%` }}
+                        />
+                      </div>
                     </div>
-                    {/* Animated Fan 2 Rotor */}
-                    <div
-                      className={`w-7 h-7 rounded-full border border-white/15 flex items-center justify-center ${
-                        fan2Speed > 0 ? 'animate-spin text-[#b9aee8]' : 'text-white/25'
-                      }`}
-                      style={{
-                        animationDuration: fan2Speed >= 100 ? '0.45s' : fan2Speed > 0 ? '0.95s' : '0s',
-                      }}
-                    >
-                      ✦
-                    </div>
+                    {renderAnimatedTurbine(fan2Speed, '#b9aee8')}
                   </div>
 
                   <div className={`${GLASS_SUBSLAB_CLASS} p-3.5`}>
@@ -1203,6 +1308,9 @@ export const TejprakashWorkspace: React.FC<TejprakashWorkspaceProps> = ({
                     <code className="text-xs font-mono text-white/85 mt-1 block">
                       {lastTxCommand}
                     </code>
+                    <span className="text-[10px] text-[#36d67e]/80 mt-1 block">
+                      ● 9600 Baud Live
+                    </span>
                   </div>
                 </div>
               </div>

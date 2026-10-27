@@ -63,6 +63,7 @@ const SYSTEM_PRESETS = [
 export default function App() {
   const canvasMountRef = useRef<HTMLDivElement | null>(null);
   const domOverlayRef = useRef<HTMLDivElement | null>(null);
+  const workspaceWrapRef = useRef<HTMLDivElement | null>(null);
 
   const [fallbackMode, setFallbackMode] = useState(false);
   const [viewport, setViewport] = useState<{ w: number; h: number }>(() => ({
@@ -666,7 +667,7 @@ export default function App() {
       pointerNdc.set((e.clientX / W) * 2 - 1, -(e.clientY / H) * 2 + 1);
       raycaster.setFromCamera(pointerNdc, camera);
 
-      if (phaseRef.current === 'hero' || phaseRef.current === 'entering') {
+      if (phaseRef.current === 'hero' || phaseRef.current === 'entering' || phaseRef.current === 'paper') {
         const hits = raycaster.intersectObjects(interactableMeshes, false);
         hoveredPieceId = hits.length > 0 ? (hits[0].object.userData.pieceId as PieceId) : null;
       } else {
@@ -801,14 +802,31 @@ export default function App() {
       const phase = phaseRef.current;
       const phaseElapsed = nowSec - phaseStartTimeRef.current;
 
-      const targetInfluence =
-        pointerInside && (phase === 'hero' || phase === 'entering') ? 1.0 : 0.0;
+      const targetInfluence = pointerInside
+        ? 1.0
+        : phase === 'paper' || phase === 'shattering'
+        ? 0.75
+        : 0.0;
       const infAlpha = 1 - Math.exp(-dt / 0.18);
       pointerInfluence += (targetInfluence - pointerInfluence) * infAlpha;
       cursorGlowUniforms.uPointerGlow.value = pointerInfluence;
 
-      const tiltXInput = pointerInside && phase === 'hero' ? pointerNormX * 2 : 0;
-      const tiltYInput = pointerInside && phase === 'hero' ? pointerNormY * 2 : 0;
+      if (!pointerInside && (phase === 'paper' || phase === 'shattering')) {
+        cursorGlowUniforms.uPointerWorld.value.set(
+          Math.cos(nowSec * 0.85) * W * 0.42,
+          Math.sin(nowSec * 0.65) * H * 0.38,
+          0
+        );
+      }
+
+      const ambientOrbitX = phase === 'paper' ? Math.sin(nowSec * 0.75) * 0.55 : 0;
+      const ambientOrbitY = phase === 'paper' ? Math.cos(nowSec * 0.6) * 0.45 : 0;
+      const tiltXInput =
+        (pointerInside && (phase === 'hero' || phase === 'paper') ? pointerNormX * 2 : 0) +
+        ambientOrbitX;
+      const tiltYInput =
+        (pointerInside && (phase === 'hero' || phase === 'paper') ? pointerNormY * 2 : 0) +
+        ambientOrbitY;
       const targetBlockRotY = (tiltXInput * 7.0 - 1.2) * DEG2RAD;
       const targetBlockRotX = (-tiltYInput * 5.5 + 0.8) * DEG2RAD;
       const tiltAlpha = 1 - Math.exp(-dt / 0.3);
@@ -818,16 +836,18 @@ export default function App() {
       blockGroup.rotation.set(currentBlockRotX, currentBlockRotY, 0);
       blockGroup.updateMatrixWorld(true);
 
-      if (phase !== 'paper' && nowSec - lastGeoRebuildSec >= 1 / 45) {
+      if (phase === 'hero' && nowSec - lastGeoRebuildSec >= 1 / 45) {
         lastGeoRebuildSec = nowSec;
         rebuildCutCellsGeometry(nowSec, pointerPanelNorm, pointerInfluence);
       }
 
       const baseIridescence = 0.55;
+      let maxShatterU = 0;
 
-      for (const id of pieceIds) {
+      for (let pieceIdx = 0; pieceIdx < pieceIds.length; pieceIdx++) {
+        const id = pieceIds[pieceIdx];
         const piece = pieces[id];
-        const isHovered = phase === 'hero' && hoveredPieceId === id;
+        const isHovered = (phase === 'hero' || phase === 'paper') && hoveredPieceId === id;
 
         const targetLift = isHovered ? (id === 'nav' ? 32 * layout.S : 50 * layout.S) : 0;
         let targetTipX = 0;
@@ -851,11 +871,6 @@ export default function App() {
         piece.rotYSpring = stepSpring(piece.rotYSpring, targetTipY, dt, 170, 19);
         piece.sheenSpring = stepSpring(piece.sheenSpring, isHovered ? 1 : 0, dt, 170, 19);
 
-        const sheen = Math.max(0, Math.min(1, piece.sheenSpring.value));
-        piece.glassMesh.material.iridescence =
-          baseIridescence + (1.0 - baseIridescence) * sheen;
-        piece.glassMesh.material.envMapIntensity = 1.0 + 0.9 * sheen;
-
         const traj = shatterTrajectories[id];
         let shatterU = 0;
 
@@ -869,13 +884,17 @@ export default function App() {
             shatterU = 1 - easeOutBack(localT, 1.15);
           }
         } else if (phase === 'shattering') {
-          const localT = (phaseElapsed - traj.staggerSec) / 0.72;
+          const localT = (phaseElapsed - traj.staggerSec) / 0.76;
           if (localT <= 0) {
             shatterU = 0;
           } else if (localT >= 1) {
             shatterU = 1;
           } else {
-            shatterU = easeInCubic(localT);
+            // Smooth C1 ease-in-out curve so shards accelerate from the fracture and glide smoothly into the screen border with 0 velocity jump
+            shatterU =
+              localT < 0.42
+                ? 1.9841 * localT * localT
+                : 1 - Math.pow(1 - localT, 3) * 3.3069;
           }
         } else if (phase === 'paper') {
           shatterU = 1;
@@ -890,51 +909,89 @@ export default function App() {
           }
         }
 
+        if (shatterU > maxShatterU) maxShatterU = shatterU;
+
+        const sheen = Math.max(0, Math.min(1, piece.sheenSpring.value));
+        const borderGlassBoost = Math.max(0, shatterU) * 0.44;
+        piece.glassMesh.material.iridescence = Math.min(
+          1.0,
+          baseIridescence + (1.0 - baseIridescence) * sheen + borderGlassBoost
+        );
+        piece.glassMesh.material.envMapIntensity =
+          1.0 + 0.9 * sheen + Math.max(0, shatterU) * 0.75;
+
         const pose = evaluateShatterPose(traj, shatterU);
 
+        // Smoothly ramp in the zero-gravity 3D breathing & drift so derivative at u=1 is continuous
+        const clampedU = Math.max(0, Math.min(1, shatterU));
+        const floatWeight = clampedU * clampedU * (3 - 2 * clampedU);
+        const floatPhase = nowSec * 1.35 + pieceIdx * 1.25;
+        const floatX = Math.sin(floatPhase) * 32 * layout.S * floatWeight;
+        const floatY = Math.cos(floatPhase * 0.9) * 26 * layout.S * floatWeight;
+        const floatZ = Math.sin(floatPhase * 0.75) * 36 * layout.S * floatWeight;
+        const floatAngle =
+          pose.angle + Math.sin(nowSec * 1.2 + pieceIdx * 1.4) * 0.28 * floatWeight;
+
         piece.group.position.set(
-          piece.restCenter.x + pose.dx,
-          piece.restCenter.y + pose.dy,
-          piece.liftSpring.value + pose.dz
+          piece.restCenter.x + pose.dx + floatX,
+          piece.restCenter.y + pose.dy + floatY,
+          piece.liftSpring.value + pose.dz + floatZ
         );
 
         piece.group.rotation.set(piece.rotXSpring.value, piece.rotYSpring.value, 0);
-        if (Math.abs(pose.angle) > 1e-4) {
+        if (Math.abs(floatAngle) > 1e-4) {
           scratchAxis.set(pose.axis[0], pose.axis[1], pose.axis[2]);
-          scratchQuat.setFromAxisAngle(scratchAxis, pose.angle);
+          scratchQuat.setFromAxisAngle(scratchAxis, floatAngle);
           piece.group.quaternion.multiply(scratchQuat);
         }
 
-        piece.group.visible = shatterU < 0.995;
+        piece.group.visible = true;
       }
 
+      panelPrintMaterial.opacity = Math.max(0.14, 1 - maxShatterU * 0.86);
+      navPrintMaterial.opacity = Math.max(0.14, 1 - maxShatterU * 0.86);
+
       const maxStagger = 0.15;
-      const totalFlightDuration = 0.72 + maxStagger;
+      const totalFlightDuration = 0.76 + maxStagger;
       const showSliver = portalModeRef.current === 'rules';
 
       if (phase === 'entering' && phaseElapsed >= totalFlightDuration) {
         phaseRef.current = 'hero';
         setPhaseState('hero');
       } else if (phase === 'shattering') {
-        const defAlpha = Math.max(0, Math.min(1, (phaseElapsed - 0.28) / 0.4));
-        setDefinitionsOpacity(defAlpha);
+        const defAlpha = Math.max(0, Math.min(1, (phaseElapsed - 0.18) / 0.52));
+        if (workspaceWrapRef.current) {
+          workspaceWrapRef.current.style.opacity = String(defAlpha);
+          workspaceWrapRef.current.style.pointerEvents = defAlpha > 0.6 ? 'auto' : 'none';
+        }
 
         const sliverT = Math.max(0, Math.min(1, (phaseElapsed - 0.3) / 0.38));
         const sliverScale = sliverT > 0 ? Math.max(0, easeOutBack(sliverT, 1.1)) : 0;
         backSliverGroup.visible = showSliver && sliverScale > 0.01;
         backSliverGroup.scale.setScalar(Math.max(0.001, sliverScale));
 
-        if (phaseElapsed >= Math.max(totalFlightDuration, 0.75)) {
+        if (phaseElapsed >= totalFlightDuration) {
           phaseRef.current = 'paper';
           setPhaseState('paper');
           setDefinitionsOpacity(1);
+          if (workspaceWrapRef.current) {
+            workspaceWrapRef.current.style.opacity = '1';
+            workspaceWrapRef.current.style.pointerEvents = 'auto';
+          }
         }
       } else if (phase === 'paper') {
         backSliverGroup.visible = showSliver;
         backSliverGroup.scale.setScalar(1);
+        if (workspaceWrapRef.current) {
+          workspaceWrapRef.current.style.opacity = '1';
+          workspaceWrapRef.current.style.pointerEvents = 'auto';
+        }
       } else if (phase === 'reassembling') {
         const defAlpha = Math.max(0, 1 - phaseElapsed / 0.25);
-        setDefinitionsOpacity(defAlpha);
+        if (workspaceWrapRef.current) {
+          workspaceWrapRef.current.style.opacity = String(defAlpha);
+          workspaceWrapRef.current.style.pointerEvents = 'none';
+        }
 
         const sliverScale = Math.max(0, 1 - easeInCubic(Math.min(1, phaseElapsed / 0.25)));
         backSliverGroup.visible = showSliver && sliverScale > 0.01;
@@ -1344,19 +1401,30 @@ export default function App() {
         </div>
       )}
 
-      {/* Shatter Reveal 1: Plain Dark Tejprakash Workspace (for Camera & Controller Modes) */}
-      <TejprakashWorkspace
-        visible={phaseState === 'paper' && (portalMode === 'camera' || portalMode === 'controller')}
-        initialRole={portalMode === 'camera' ? 'camera' : 'controller'}
-        onBackToHero={handleBackClick}
-        onRequestControllerLogin={() => {
-          setPasswordError(null);
-          setPasswordModalOpen(true);
+      {/* Shatter Reveal 1: Smoked-Glass Tejprakash Workspace (for Camera & Controller Modes) */}
+      <div
+        ref={workspaceWrapRef}
+        style={{
+          opacity: phaseState === 'paper' ? 1 : 0,
+          pointerEvents: phaseState === 'paper' ? 'auto' : 'none',
+          willChange: 'opacity',
         }}
-        fan1Speed={fan1Speed}
-        fan2Speed={fan2Speed}
-        onFanSpeedChange={handleFanSpeedChange}
-      />
+      >
+        <TejprakashWorkspace
+          visible={
+            postShatterVisible && (portalMode === 'camera' || portalMode === 'controller')
+          }
+          initialRole={portalMode === 'camera' ? 'camera' : 'controller'}
+          onBackToHero={handleBackClick}
+          onRequestControllerLogin={() => {
+            setPasswordError(null);
+            setPasswordModalOpen(true);
+          }}
+          fan1Speed={fan1Speed}
+          fan2Speed={fan2Speed}
+          onFanSpeedChange={handleFanSpeedChange}
+        />
+      </div>
 
       {/* Shatter Reveal 2: Five System Rules of The Tejprakash (when clicking "System rules →") */}
       <DefinitionsView
