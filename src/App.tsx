@@ -36,6 +36,7 @@ import { DefinitionsView } from './components/DefinitionsView';
 import { ActivePortalMode } from './components/CircuitCityOverlay';
 import { TejprakashWorkspace } from './components/TejprakashWorkspace';
 import { StaticFallback } from './components/StaticFallback';
+import { verifyAdminPassword } from './utils/tejprakashLogic';
 
 type ViewPhase = 'entering' | 'hero' | 'shattering' | 'paper' | 'reassembling';
 
@@ -135,7 +136,11 @@ export default function App() {
       e.preventDefault();
       const trimmed = passwordInput.trim();
       if (trimmed.length === 0) {
-        setPasswordError('Please enter controller password (e.g. admin123)');
+        setPasswordError('Please enter the controller password.');
+        return;
+      }
+      if (!verifyAdminPassword(trimmed)) {
+        setPasswordError('Incorrect password. Access restricted to authorized controller.');
         return;
       }
       setPasswordModalOpen(false);
@@ -1126,15 +1131,6 @@ export default function App() {
               >
                 Controller
               </button>
-              <button
-                type="button"
-                onClick={handleReadPaperClick}
-                onMouseEnter={() => updateHoverFlag({ hoveredNavLink: 'pricing' })}
-                onMouseLeave={() => updateHoverFlag({ hoveredNavLink: null })}
-                className="text-transparent cursor-pointer bg-transparent border-0 p-1 whitespace-nowrap shrink-0 focus:outline-none focus-visible:ring-1 focus-visible:ring-white/40 rounded"
-              >
-                AI Rules
-              </button>
             </nav>
           )}
 
@@ -1187,7 +1183,7 @@ export default function App() {
             zero waste.
           </h1>
 
-          {/* Two-line sub */}
+          {/* Two-line Vision Thought */}
           <p
             className="absolute m-0 text-transparent"
             style={{
@@ -1197,9 +1193,9 @@ export default function App() {
               lineHeight: 1.52,
             }}
           >
-            Automated classroom fan and lighting control powered by live camera vision.
+            Power should follow presence, never carelessness.
             <br />
-            Pair a smartphone camera with AI occupancy rules or manual L298N motor control.
+            Every empty classroom saved today lights a greener tomorrow.
           </p>
 
           {/* "Camera" light pill button */}
@@ -1246,25 +1242,6 @@ export default function App() {
             Controller
           </button>
 
-          {/* "System rules →" link button */}
-          <button
-            type="button"
-            data-testid="btn-rules"
-            onClick={handleReadPaperClick}
-            onMouseEnter={() => updateHoverFlag({ readPaperHovered: true })}
-            onMouseLeave={() => updateHoverFlag({ readPaperHovered: false })}
-            onFocus={() => updateHoverFlag({ readPaperHovered: true })}
-            onBlur={() => updateHoverFlag({ readPaperHovered: false })}
-            className="absolute -translate-y-1/2 text-transparent font-medium cursor-pointer bg-transparent border-0 py-2 px-1 whitespace-nowrap shrink-0 focus:outline-none focus-visible:ring-2 focus-visible:ring-white/40 rounded"
-            style={{
-              left: `${metrics.readPaperX}px`,
-              top: `${metrics.readPaperY}px`,
-              fontSize: `${metrics.readPaperFontPx}px`,
-            }}
-          >
-            System rules →
-          </button>
-
           {/* Bottom-left & Bottom-right captions */}
           <span
             className="absolute text-transparent whitespace-nowrap"
@@ -1290,16 +1267,18 @@ export default function App() {
         </main>
       </div>
 
-      {/* Admin Controller Password Prompt Modal (Opens when clicking "Controller") */}
+      {/* Admin Controller Password Prompt Modal (Smoked-Glass Slab, No Password Hint) */}
       {passwordModalOpen && (
         <div
           data-testid="controller-password-modal"
-          className="fixed inset-0 z-40 flex items-center justify-center bg-black/70 backdrop-blur-md p-4"
+          className="fixed inset-0 z-40 flex items-center justify-center bg-black/75 backdrop-blur-md p-4"
         >
-          <div className="w-full max-w-md rounded-2xl bg-[#11131a]/95 border border-sky-400/30 p-7 text-white shadow-[0_0_60px_rgba(14,165,233,0.25)]">
+          <div className="relative w-full max-w-md rounded-[20px] bg-[#16161b]/92 backdrop-blur-2xl border border-white/[0.12] p-7 text-white shadow-[inset_0_1px_0_0_rgba(255,255,255,0.20),inset_1px_0_0_0_rgba(255,255,255,0.08),0_28px_70px_rgba(0,0,0,0.85)]">
+            <div className="pointer-events-none absolute inset-x-8 top-0 h-[1px] bg-gradient-to-r from-transparent via-[#b9aee8]/45 to-transparent" />
+
             <div className="flex items-center justify-between mb-2">
-              <span className="text-[10px] font-semibold tracking-[0.2em] uppercase text-sky-400">
-                RESTRICTED CONTROLLER ACCESS
+              <span className="text-[10px] font-medium tracking-[0.2em] uppercase text-white/40">
+                THE TEJPRAKASH · RESTRICTED ACCESS
               </span>
               <button
                 type="button"
@@ -1310,20 +1289,20 @@ export default function App() {
               </button>
             </div>
 
-            <h2 className="text-xl font-semibold tracking-tight mb-1.5">
-              Controller Admin Login
+            <h2 className="text-xl font-medium tracking-[-0.03em] text-white/95 mb-1.5">
+              Controller Authorization
             </h2>
-            <p className="text-xs text-white/60 leading-relaxed mb-5">
-              Enter the controller password to unlock Manual &amp; AI Model Dual-Fan Control with live classroom camera feed.
+            <p className="text-xs text-white/55 leading-relaxed mb-5">
+              Enter the administrator password to unlock Manual &amp; AI Model Dual-Fan Control.
             </p>
 
             <form onSubmit={handlePasswordSubmit} className="space-y-4">
               <div>
                 <label
                   htmlFor="controller-password-input"
-                  className="block text-[11px] font-medium text-sky-200/80 mb-1.5"
+                  className="block text-[11px] font-medium text-white/60 mb-1.5"
                 >
-                  Admin Password
+                  Administrator Password
                 </label>
                 <input
                   id="controller-password-input"
@@ -1335,35 +1314,27 @@ export default function App() {
                     setPasswordInput(e.target.value);
                     setPasswordError(null);
                   }}
-                  placeholder="Enter password (e.g. admin123)"
-                  className="w-full px-3.5 py-2.5 rounded-xl bg-[#070a12] border border-sky-400/35 text-sm text-white placeholder-white/30 focus:outline-none focus:border-sky-400"
+                  placeholder="Enter controller password"
+                  className="w-full px-3.5 py-2.5 rounded-[10px] bg-[#08080b] border border-white/[0.15] text-sm text-white placeholder-white/30 focus:outline-none focus:border-[#36d67e]"
                 />
                 {passwordError && (
                   <p className="text-[11px] text-rose-400 mt-1.5 m-0">{passwordError}</p>
                 )}
               </div>
 
-              <div className="flex items-center justify-between gap-3 pt-1">
+              <div className="flex items-center justify-end gap-2.5 pt-1">
                 <button
                   type="button"
-                  onClick={() => {
-                    setPasswordInput('admin123');
-                    setPasswordModalOpen(false);
-                    if (phaseState === 'paper') {
-                      setPortalMode('controller');
-                    } else {
-                      triggerShatterRef.current('controller');
-                    }
-                  }}
-                  className="px-3.5 py-2.5 rounded-xl bg-white/5 hover:bg-white/10 border border-white/15 text-xs text-sky-300 font-medium cursor-pointer transition-colors"
+                  onClick={() => setPasswordModalOpen(false)}
+                  className="px-4 py-2.5 rounded-[7px] bg-white/[0.06] hover:bg-white/[0.12] border border-white/[0.14] text-xs font-medium text-white/80 cursor-pointer transition-all"
                 >
-                  Quick Demo Login
+                  Cancel
                 </button>
 
                 <button
                   type="submit"
                   data-testid="controller-password-submit"
-                  className="flex-1 py-2.5 px-5 rounded-xl bg-emerald-400 hover:bg-emerald-300 text-slate-950 font-semibold text-xs cursor-pointer transition-all"
+                  className="px-6 py-2.5 rounded-[7px] bg-[#ededf0] hover:bg-[#36d67e] text-[#09090c] font-medium text-xs cursor-pointer transition-all"
                 >
                   Unlock Controller →
                 </button>

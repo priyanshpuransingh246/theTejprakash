@@ -169,17 +169,17 @@ export function drawPanelCanvas(
     headlineTracking
   );
 
-  // 3. Two-line sub: 55% white
+  // 3. Two-line vision thought: 58% white
   ctx.font = `400 ${metrics.subFontPx}px ${fontStack}`;
-  ctx.fillStyle = 'rgba(255, 255, 255, 0.55)';
+  ctx.fillStyle = 'rgba(255, 255, 255, 0.58)';
   ctx.textBaseline = 'top';
   ctx.fillText(
-    'Automated classroom fan and lighting control powered by live camera vision.',
+    'Power should follow presence, never carelessness.',
     metrics.padX,
     metrics.subY
   );
   ctx.fillText(
-    'Pair a smartphone camera with AI occupancy rules or manual L298N motor control.',
+    'Every empty classroom saved today lights a greener tomorrow.',
     metrics.padX,
     metrics.subY + metrics.subLineHeight
   );
@@ -232,29 +232,7 @@ export function drawPanelCanvas(
   );
   ctx.restore();
 
-  // 5. "System rules →" link (underlines on hover)
-  ctx.save();
-  ctx.font = `500 ${metrics.readPaperFontPx}px ${fontStack}`;
-  ctx.fillStyle = hover.readPaperHovered
-    ? 'rgba(255, 255, 255, 0.96)'
-    : 'rgba(255, 255, 255, 0.78)';
-  ctx.textAlign = 'left';
-  ctx.textBaseline = 'middle';
-  const readText = 'System rules →';
-  ctx.fillText(readText, metrics.readPaperX, metrics.readPaperY);
-
-  if (hover.readPaperHovered) {
-    const textW = ctx.measureText(readText).width;
-    ctx.strokeStyle = 'rgba(255, 255, 255, 0.9)';
-    ctx.lineWidth = Math.max(1, 1.2 * Math.max(0.6, layout.S));
-    ctx.beginPath();
-    ctx.moveTo(metrics.readPaperX, metrics.readPaperY + metrics.readPaperFontPx * 0.58);
-    ctx.lineTo(metrics.readPaperX + textW, metrics.readPaperY + metrics.readPaperFontPx * 0.58);
-    ctx.stroke();
-  }
-  ctx.restore();
-
-  // 6. "© The Tejprakash" bottom-left and "Arduino UNO · L298N · Dual DC Fans" bottom-right, 11·S px at 34% white
+  // 5. "© The Tejprakash" bottom-left and "Arduino UNO · L298N · Dual DC Fans" bottom-right, 11·S px at 34% white
   ctx.font = `400 ${metrics.footerFontPx}px ${fontStack}`;
   ctx.fillStyle = 'rgba(255, 255, 255, 0.34)';
   ctx.textAlign = 'left';
@@ -328,18 +306,17 @@ export function drawNavCanvas(
   ctx.textBaseline = 'middle';
   ctx.fillText('The Tejprakash', sqX + sqSize + Math.max(8, 10 * effS), midY + 0.5);
 
-  // Center links: "Camera · Controller · AI Rules"
+  // Center links: "Camera · Controller"
   if (!layout.isPhone) {
     ctx.font = `400 ${metrics.navFontPx}px ${fontStack}`;
-    const items: Array<{ key: 'studio' | 'materials' | 'pricing'; label: string }> = [
+    const items: Array<{ key: 'studio' | 'materials'; label: string }> = [
       { key: 'studio', label: 'Camera' },
       { key: 'materials', label: 'Controller' },
-      { key: 'pricing', label: 'AI Rules' },
     ];
     const dot = '   ·   ';
     const dotW = ctx.measureText(dot).width;
     const widths = items.map((item) => ctx.measureText(item.label).width);
-    const totalW = widths.reduce((a, b) => a + b, 0) + dotW * 2;
+    const totalW = widths.reduce((a, b) => a + b, 0) + dotW;
     let curX = (blockWidth - totalW) * 0.5;
 
     items.forEach((item, idx) => {

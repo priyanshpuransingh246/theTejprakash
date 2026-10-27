@@ -5,6 +5,8 @@ import {
   computeAiFanDecision,
   ControlMode,
   formatArduinoCommand,
+  setStoredAdminPassword,
+  verifyAdminPassword,
 } from '../utils/tejprakashLogic';
 import {
   DetectedPersonBox,
@@ -41,6 +43,13 @@ export interface TejprakashWorkspaceProps {
 
 const DEFAULT_ROOM_ID = 'TEJ-108';
 
+// Reusable Smoked-Glass Slab class matching the WebGL Landing Hero's #17171b extruded glass
+const GLASS_SLAB_CLASS =
+  'relative rounded-[20px] bg-[#16161b]/88 backdrop-blur-2xl border border-white/[0.11] shadow-[inset_0_1px_0_0_rgba(255,255,255,0.20),inset_1px_0_0_0_rgba(255,255,255,0.08),0_24px_60px_rgba(0,0,0,0.78)]';
+
+const GLASS_SUBSLAB_CLASS =
+  'relative rounded-[14px] bg-[#0d0d11]/90 border border-white/[0.08] shadow-[inset_0_1px_0_0_rgba(255,255,255,0.10)]';
+
 export const TejprakashWorkspace: React.FC<TejprakashWorkspaceProps> = ({
   visible,
   initialRole,
@@ -53,7 +62,7 @@ export const TejprakashWorkspace: React.FC<TejprakashWorkspaceProps> = ({
   const [role, setRole] = useState<'camera' | 'controller'>(initialRole);
   const [roomId] = useState<string>(DEFAULT_ROOM_ID);
 
-  // Controller mode: 'manual' vs 'ai' (as required by DOCX)
+  // Controller mode: 'manual' vs 'ai'
   const [controlMode, setControlMode] = useState<ControlMode>('ai');
 
   // Camera state
@@ -76,11 +85,19 @@ export const TejprakashWorkspace: React.FC<TejprakashWorkspaceProps> = ({
 
   // Arduino Web Serial State
   const [serialConnected, setSerialConnected] = useState(false);
-  const [serialStatus, setSerialStatus] = useState<string>('USB Not Paired');
+  const [serialStatus, setSerialStatus] = useState<string>('USB Standby');
   const [lastTxCommand, setLastTxCommand] = useState<string>('F1:0,F2:0');
   const [lastArduinoReply, setLastArduinoReply] = useState<string>('—');
   const [showArduinoCodeModal, setShowArduinoCodeModal] = useState(false);
   const [copiedCode, setCopiedCode] = useState(false);
+
+  // Admin Password Change Modal State
+  const [showPasswordModal, setShowPasswordModal] = useState(false);
+  const [currentPwdInput, setCurrentPwdInput] = useState('');
+  const [newPwdInput, setNewPwdInput] = useState('');
+  const [confirmPwdInput, setConfirmPwdInput] = useState('');
+  const [pwdChangeError, setPwdChangeError] = useState<string | null>(null);
+  const [pwdChangeSuccess, setPwdChangeSuccess] = useState<string | null>(null);
 
   // Refs for media, canvas, WebSocket, PeerJS, and Serial
   const localVideoRef = useRef<HTMLVideoElement | null>(null);
@@ -100,14 +117,16 @@ export const TejprakashWorkspace: React.FC<TejprakashWorkspaceProps> = ({
   const lastSentCmdRef = useRef<string>('');
   const lastSentTimeRef = useRef<number>(0);
 
-  // Sync role when initialRole changes
   useEffect(() => {
     setRole(initialRole);
   }, [initialRole]);
 
-  // Preload COCO-SSD AI person detection model when workspace becomes visible
+  const hasActiveVisionInput =
+    localCameraActive || remoteStreamActive || Boolean(remoteFrameUrl);
+
+  // Load COCO-SSD AI person detection model on demand when a camera feed is active
   useEffect(() => {
-    if (!visible) return;
+    if (!visible || !hasActiveVisionInput) return;
     let cancelled = false;
     setAiModelLoading(true);
     getCocoSsdModel()
@@ -123,7 +142,7 @@ export const TejprakashWorkspace: React.FC<TejprakashWorkspaceProps> = ({
     return () => {
       cancelled = true;
     };
-  }, [visible]);
+  }, [visible, hasActiveVisionInput]);
 
   // Write command to Arduino UNO over Web Serial
   const sendCommandToArduino = useCallback(async (f1: number, f2: number, force = false) => {
@@ -156,7 +175,7 @@ export const TejprakashWorkspace: React.FC<TejprakashWorkspaceProps> = ({
       serial?: { requestPort: () => Promise<WebSerialPort> };
     };
     if (!nav.serial) {
-      setSerialStatus('Use Chrome or Edge on Laptop for USB Web Serial');
+      setSerialStatus('Use Chrome/Edge on Laptop for USB Serial');
       return;
     }
 
@@ -165,9 +184,8 @@ export const TejprakashWorkspace: React.FC<TejprakashWorkspaceProps> = ({
       await port.open({ baudRate: 9600 });
       serialPortRef.current = port;
       setSerialConnected(true);
-      setSerialStatus('Arduino UNO Connected (9600 baud)');
+      setSerialStatus('UNO Paired (9600 baud)');
 
-      // Start reading Arduino responses in background
       if (port.readable) {
         (async () => {
           try {
@@ -195,17 +213,16 @@ export const TejprakashWorkspace: React.FC<TejprakashWorkspaceProps> = ({
         })();
       }
 
-      // Send initial state after Arduino boot delay (1.6s)
       window.setTimeout(() => {
         sendCommandToArduino(fan1Speed, fan2Speed, true);
       }, 1600);
     } catch (err) {
-      const msg = err instanceof Error ? err.message : 'Connection cancelled';
+      const msg = err instanceof Error ? err.message : 'Cancelled';
       setSerialStatus(`USB: ${msg}`);
     }
   };
 
-  // Start or stop local camera (used immediately in Camera role, or optionally in Controller role)
+  // Start or stop local camera
   const startLocalCamera = useCallback(
     async (preferredFacing: 'environment' | 'user' = facingMode) => {
       setCameraError(null);
@@ -214,7 +231,7 @@ export const TejprakashWorkspace: React.FC<TejprakashWorkspaceProps> = ({
           mediaStreamRef.current.getTracks().forEach((t) => t.stop());
         }
         if (!navigator.mediaDevices?.getUserMedia) {
-          throw new Error('Camera API not available in this browser context');
+          throw new Error('Camera permission requires HTTPS or localhost');
         }
         let stream: MediaStream;
         try {
@@ -262,7 +279,6 @@ export const TejprakashWorkspace: React.FC<TejprakashWorkspaceProps> = ({
     }
   }, [role, roomId]);
 
-  // Automatically start camera when entering as Smartphone Camera Node
   useEffect(() => {
     if (!visible) return;
     if (role === 'camera' && !localCameraActive) {
@@ -270,18 +286,16 @@ export const TejprakashWorkspace: React.FC<TejprakashWorkspaceProps> = ({
     }
   }, [visible, role, localCameraActive, facingMode, startLocalCamera]);
 
-  // Clean up camera when leaving workspace
   useEffect(() => {
     if (!visible && localCameraActive) {
       stopLocalCamera();
     }
   }, [visible, localCameraActive, stopLocalCamera]);
 
-  // Set up WebSocket + BroadcastChannel + PeerJS real-time link between Smartphone Camera and Laptop Controller
+  // Real-time WebSocket + BroadcastChannel + PeerJS link
   useEffect(() => {
     if (!visible) return;
 
-    // 1. BroadcastChannel (instant sync across tabs on the same device)
     let bc: BroadcastChannel | null = null;
     if (typeof BroadcastChannel !== 'undefined') {
       bc = new BroadcastChannel(`tejprakash_${roomId}`);
@@ -302,11 +316,12 @@ export const TejprakashWorkspace: React.FC<TejprakashWorkspaceProps> = ({
           if (typeof data.fan1Speed === 'number' && typeof data.fan2Speed === 'number') {
             onFanSpeedChange(data.fan1Speed, data.fan2Speed);
           }
+        } else if (data.type === 'admin:password_changed' && typeof data.newPassword === 'string') {
+          setStoredAdminPassword(data.newPassword);
         }
       };
     }
 
-    // 2. WebSocket link to server.ts (/ws)
     const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
     const wsUrl = `${proto}//${window.location.host}/ws`;
     let ws: WebSocket | null = null;
@@ -370,13 +385,12 @@ export const TejprakashWorkspace: React.FC<TejprakashWorkspaceProps> = ({
           }
         };
       } catch {
-        // Fallback to PeerJS / HTTP
+        // Fallback to PeerJS
       }
     };
 
     connectWs();
 
-    // 3. PeerJS WebRTC fallback (allows Smartphone -> Laptop streaming even on static GitHub Pages!)
     const peerId =
       role === 'controller'
         ? `tejprakash-ctrl-${roomId.toLowerCase()}`
@@ -458,7 +472,6 @@ export const TejprakashWorkspace: React.FC<TejprakashWorkspaceProps> = ({
     };
   }, [visible, role, roomId, onFanSpeedChange]);
 
-  // When camera stream starts in Camera role, also call Controller via PeerJS if available
   useEffect(() => {
     if (
       role === 'camera' &&
@@ -479,7 +492,7 @@ export const TejprakashWorkspace: React.FC<TejprakashWorkspaceProps> = ({
     }
   }, [role, localCameraActive, roomId]);
 
-  // Continuous AI Person Detection + Frame Broadcast Loop (runs at ~5 fps)
+  // Continuous AI Person Detection + Frame Broadcast Loop
   useEffect(() => {
     if (!visible) return;
     let active = true;
@@ -495,13 +508,11 @@ export const TejprakashWorkspace: React.FC<TejprakashWorkspaceProps> = ({
         : null;
 
       if (videoEl && videoEl.readyState >= 2 && videoEl.videoWidth > 0) {
-        // 1. Run AI Person Detection on active video
         const { count, boxes } = await detectPersonsInElement(videoEl, 0.42);
         if (!active) return;
         setRawDetectedCount(count);
         setDetectedBoxes(boxes);
 
-        // 2. If we are the Smartphone Camera Node, compress & broadcast frame + person count to Controller
         if (role === 'camera') {
           let canvas = captureCanvasRef.current;
           if (!canvas) {
@@ -555,7 +566,6 @@ export const TejprakashWorkspace: React.FC<TejprakashWorkspaceProps> = ({
         remoteImgRef.current.complete &&
         remoteImgRef.current.naturalWidth > 0
       ) {
-        // Also run local detection on incoming remote image if needed
         const { count, boxes } = await detectPersonsInElement(remoteImgRef.current, 0.42);
         if (active && count >= 0) {
           setRawDetectedCount(count);
@@ -605,17 +615,20 @@ export const TejprakashWorkspace: React.FC<TejprakashWorkspaceProps> = ({
       ctx.lineWidth = 3;
       ctx.strokeRect(x, y, w, h);
 
-      const label = `PERSON ${Math.round(item.score * 100)}%`;
-      ctx.font = '600 13px Inter, sans-serif';
-      const textW = ctx.measureText(label).width + 12;
-      ctx.fillStyle = 'rgba(16, 185, 129, 0.92)';
-      ctx.fillRect(x, Math.max(0, y - 24), textW, 24);
-      ctx.fillStyle = '#04130a';
-      ctx.fillText(label, x + 6, Math.max(16, y - 7));
+      const label = `PERSON · ${Math.round(item.score * 100)}%`;
+      ctx.font = '600 12px Inter, sans-serif';
+      const textW = ctx.measureText(label).width + 14;
+      ctx.fillStyle = 'rgba(20, 20, 26, 0.88)';
+      ctx.fillRect(x, Math.max(0, y - 26), textW, 24);
+      ctx.strokeStyle = '#36d67e';
+      ctx.lineWidth = 1.5;
+      ctx.strokeRect(x, Math.max(0, y - 26), textW, 24);
+      ctx.fillStyle = '#36d67e';
+      ctx.fillText(label, x + 7, Math.max(16, y - 9));
     }
   }, [detectedBoxes, localCameraActive, remoteStreamActive, remoteFrameUrl]);
 
-  // Stabilize person count over 1.1s so a single-frame camera flicker never jerks the motors
+  // Stabilize person count over 850ms so single-frame flicker never jerks the motors
   useEffect(() => {
     if (aiCountOverride !== null) {
       setStablePersonCount(aiCountOverride);
@@ -627,7 +640,6 @@ export const TejprakashWorkspace: React.FC<TejprakashWorkspaceProps> = ({
     return () => window.clearTimeout(timer);
   }, [rawDetectedCount, aiCountOverride]);
 
-  // Apply AI Mode rules automatically when controlMode === 'ai'
   const effectivePersonCount = aiCountOverride !== null ? aiCountOverride : stablePersonCount;
   const currentAiDecision = computeAiFanDecision(effectivePersonCount);
 
@@ -654,7 +666,6 @@ export const TejprakashWorkspace: React.FC<TejprakashWorkspaceProps> = ({
     sendCommandToArduino,
   ]);
 
-  // Broadcast controller fan changes to Smartphone Camera node & Arduino
   const applyManualFanChange = (nextFan1: number, nextFan2: number) => {
     setControlMode('manual');
     onFanSpeedChange(nextFan1, nextFan2);
@@ -675,7 +686,6 @@ export const TejprakashWorkspace: React.FC<TejprakashWorkspaceProps> = ({
     }
   };
 
-  // Periodic 2.5s serial keepalive when Arduino is connected
   useEffect(() => {
     if (!serialConnected) return;
     const id = window.setInterval(() => {
@@ -684,6 +694,35 @@ export const TejprakashWorkspace: React.FC<TejprakashWorkspaceProps> = ({
     return () => window.clearInterval(id);
   }, [serialConnected, fan1Speed, fan2Speed, sendCommandToArduino]);
 
+  const handleAdminPasswordChangeSubmit = (e: React.FormEvent) => {
+    e.preventDefault();
+    setPwdChangeError(null);
+    setPwdChangeSuccess(null);
+
+    if (!verifyAdminPassword(currentPwdInput)) {
+      setPwdChangeError('Current password is incorrect.');
+      return;
+    }
+    if (newPwdInput.trim().length < 4) {
+      setPwdChangeError('New password must be at least 4 characters long.');
+      return;
+    }
+    if (newPwdInput.trim() !== confirmPwdInput.trim()) {
+      setPwdChangeError('New password and confirmation do not match.');
+      return;
+    }
+
+    const updated = newPwdInput.trim();
+    setStoredAdminPassword(updated);
+    if (bcRef.current) {
+      bcRef.current.postMessage({ type: 'admin:password_changed', newPassword: updated });
+    }
+    setCurrentPwdInput('');
+    setNewPwdInput('');
+    setConfirmPwdInput('');
+    setPwdChangeSuccess('Controller password updated successfully!');
+  };
+
   if (!visible) return null;
 
   const hasAnyVideoFeed = localCameraActive || remoteStreamActive || Boolean(remoteFrameUrl);
@@ -691,96 +730,117 @@ export const TejprakashWorkspace: React.FC<TejprakashWorkspaceProps> = ({
   return (
     <div
       data-testid="tejprakash-workspace"
-      className="fixed inset-0 z-30 bg-[#07090e] text-[#f3f5f8] overflow-y-auto select-text font-sans"
+      className="fixed inset-0 z-30 bg-[#050507] text-[#ededf0] overflow-y-auto select-text font-sans"
+      style={{
+        backgroundImage:
+          'radial-gradient(circle at 18% 12%, rgba(219, 232, 255, 0.07) 0%, transparent 48%), radial-gradient(circle at 82% 85%, rgba(185, 174, 232, 0.08) 0%, transparent 52%)',
+      }}
     >
-      {/* Top Plain Header Bar */}
-      <header className="sticky top-0 z-20 bg-[#0b0e17]/95 backdrop-blur-md border-b border-white/10 px-4 md:px-8 py-3.5 flex flex-wrap items-center justify-between gap-3">
-        <div className="flex items-center gap-3">
-          <button
-            type="button"
-            data-testid="workspace-back-btn"
-            onClick={onBackToHero}
-            className="px-3.5 py-1.5 rounded-lg bg-white/8 hover:bg-white/15 border border-white/15 text-xs font-medium text-white cursor-pointer transition-colors"
-          >
-            ← Back to Glass Hero
-          </button>
+      <div className="max-w-[1540px] mx-auto px-4 sm:px-8 py-5 sm:py-7 space-y-4 sm:space-y-5">
+        {/* ====================================================================
+         * TOP SMOKED-GLASS NAV SLAB (Mirrors the Landing Hero's Nav Slab)
+         * ==================================================================== */}
+        <header className={`${GLASS_SLAB_CLASS} px-5 sm:px-8 py-4 flex flex-wrap items-center justify-between gap-4`}>
+          {/* Iridescent top edge sheen */}
+          <div className="pointer-events-none absolute inset-x-8 top-0 h-[1px] bg-gradient-to-r from-transparent via-[#b9aee8]/40 to-transparent" />
 
-          <div className="h-4 w-[1px] bg-white/15 hidden sm:block" />
-
-          <div>
-            <div className="flex items-center gap-2">
-              <span className="text-sm font-semibold tracking-tight text-white">
-                The Tejprakash
-              </span>
-              <span className="text-[10px] font-semibold uppercase tracking-widest px-2 py-0.5 rounded bg-emerald-500/15 text-emerald-300 border border-emerald-500/30">
-                {role === 'camera' ? 'Smartphone Camera Node' : 'Admin Controller'}
-              </span>
-            </div>
-            <p className="text-[11px] text-white/50 m-0 hidden sm:block">
-              Smart Classroom Energy Conservation · Arduino UNO SMD + L298N Dual Fan Control
-            </p>
-          </div>
-        </div>
-
-        {/* Right Controls: Role Switcher + Arduino Pairing + Arduino Code */}
-        <div className="flex flex-wrap items-center gap-2.5">
-          {role === 'camera' ? (
+          {/* Left: Square Facet Mark + Brand + Back Button */}
+          <div className="flex items-center gap-4">
             <button
               type="button"
-              onClick={onRequestControllerLogin}
-              className="px-3.5 py-2 rounded-lg bg-sky-500/20 hover:bg-sky-500/30 border border-sky-400/35 text-xs font-semibold text-sky-200 cursor-pointer"
+              data-testid="workspace-back-btn"
+              onClick={onBackToHero}
+              className="px-3.5 py-2 rounded-[8px] bg-white/[0.06] hover:bg-white/[0.12] border border-white/[0.16] text-xs font-medium text-white/90 hover:text-[#b9aee8] cursor-pointer transition-all"
             >
-              Switch to Controller (Login)
+              ← Back
             </button>
-          ) : (
-            <>
+
+            <div className="h-4 w-[1px] bg-white/15 hidden sm:block" />
+
+            <div className="flex items-center gap-2.5">
+              {/* Square Facet Mark matching CanvasTextures.ts */}
+              <div className="w-3.5 h-3.5 rounded-[3px] bg-white/92 relative overflow-hidden shrink-0">
+                <div className="absolute inset-0 w-[1.5px] bg-[#141418] left-1/2 -translate-x-1/2 rotate-[22deg] scale-125" />
+              </div>
+              <span className="text-[15px] font-semibold tracking-[-0.02em] text-white/95">
+                The Tejprakash
+              </span>
+              <span className="text-[10px] font-medium uppercase tracking-[0.2em] px-2.5 py-0.5 rounded-full bg-white/[0.06] border border-white/[0.14] text-[#36d67e]">
+                {role === 'camera' ? 'CAMERA NODE' : 'CONTROLLER'}
+              </span>
+            </div>
+          </div>
+
+          {/* Right Action Pills */}
+          <div className="flex flex-wrap items-center gap-2.5">
+            {role === 'camera' ? (
               <button
                 type="button"
-                data-testid="pair-arduino-btn"
-                onClick={handleConnectSerial}
-                className={`px-3.5 py-2 rounded-lg text-xs font-semibold cursor-pointer border transition-all ${
-                  serialConnected
-                    ? 'bg-emerald-500/20 border-emerald-400/50 text-emerald-200'
-                    : 'bg-amber-400 hover:bg-amber-300 border-amber-300 text-slate-950'
-                }`}
+                onClick={onRequestControllerLogin}
+                className="px-4 py-2 rounded-[7px] bg-white/[0.08] hover:bg-[#36d67e]/20 border border-white/[0.24] hover:border-[#36d67e] text-xs font-medium text-white/90 hover:text-[#36d67e] cursor-pointer transition-all"
               >
-                {serialConnected ? '● Arduino USB Paired (COM)' : '⚡ Pair Arduino USB (COM Port)'}
+                Controller Login →
               </button>
+            ) : (
+              <>
+                <button
+                  type="button"
+                  data-testid="pair-arduino-btn"
+                  onClick={handleConnectSerial}
+                  className={`px-4 py-2 rounded-[7px] text-xs font-medium cursor-pointer transition-all ${
+                    serialConnected
+                      ? 'bg-[#36d67e]/20 border border-[#36d67e] text-[#36d67e]'
+                      : 'bg-[#ededf0] hover:bg-[#36d67e] text-[#09090c]'
+                  }`}
+                >
+                  {serialConnected ? '● Arduino UNO Paired' : 'Pair Arduino USB'}
+                </button>
 
-              <button
-                type="button"
-                data-testid="open-arduino-code-btn"
-                onClick={() => setShowArduinoCodeModal(true)}
-                className="px-3.5 py-2 rounded-lg bg-white/8 hover:bg-white/15 border border-white/20 text-xs font-medium text-white cursor-pointer"
-              >
-                📋 Copy Arduino IDE Code (.ino)
-              </button>
-            </>
-          )}
-        </div>
-      </header>
+                <button
+                  type="button"
+                  data-testid="open-arduino-code-btn"
+                  onClick={() => setShowArduinoCodeModal(true)}
+                  className="px-3.5 py-2 rounded-[7px] bg-white/[0.07] hover:bg-white/[0.14] border border-white/[0.18] text-xs font-medium text-white/90 cursor-pointer transition-all"
+                >
+                  Arduino Code (.ino)
+                </button>
 
-      {/* Main Content Container */}
-      <main className="max-w-7xl mx-auto p-4 md:p-6 lg:p-8">
+                <button
+                  type="button"
+                  data-testid="change-password-btn"
+                  onClick={() => {
+                    setPwdChangeError(null);
+                    setPwdChangeSuccess(null);
+                    setShowPasswordModal(true);
+                  }}
+                  className="px-3.5 py-2 rounded-[7px] bg-white/[0.07] hover:bg-[#b9aee8]/20 border border-white/[0.18] hover:border-[#b9aee8]/60 text-xs font-medium text-white/85 hover:text-[#dcd6f7] cursor-pointer transition-all"
+                >
+                  Change Password
+                </button>
+              </>
+            )}
+          </div>
+        </header>
+
         {role === 'camera' ? (
-          /* ======================================================================
-           * VIEW 1: SMARTPHONE CAMERA NODE VIEW
-           * Opened when any user clicks "Camera" on the landing page and grants
-           * camera permission to stream their phone camera to the Controller.
-           * ====================================================================== */
-          <div className="max-w-3xl mx-auto space-y-5">
-            <div className="rounded-2xl bg-[#111622] border border-white/10 p-5 md:p-6">
-              <div className="flex flex-wrap items-center justify-between gap-3 mb-4">
+          /* ====================================================================
+           * VIEW 1: SMARTPHONE CAMERA NODE (Smoked-Glass Slab)
+           * ==================================================================== */
+          <div className="max-w-4xl mx-auto">
+            <div className={`${GLASS_SLAB_CLASS} p-6 sm:p-8 space-y-6`}>
+              <div className="pointer-events-none absolute inset-x-10 top-0 h-[1px] bg-gradient-to-r from-transparent via-[#36d67e]/45 to-transparent" />
+
+              <div className="flex flex-wrap items-end justify-between gap-4">
                 <div>
-                  <span className="text-[11px] font-semibold uppercase tracking-widest text-emerald-400 block">
-                    LIVE CLASSROOM CAMERA NODE · ROOM {roomId}
+                  <span className="text-[11px] font-medium uppercase tracking-[0.2em] text-white/40 block mb-2">
+                    THE TEJPRAKASH · VISION SENSOR NODE
                   </span>
-                  <h2 className="text-xl font-semibold text-white m-0 mt-0.5">
-                    Smartphone Camera Stream Active
+                  <h2 className="text-2xl sm:text-3xl font-medium tracking-[-0.04em] bg-gradient-to-b from-[#dcdce0] to-[#bdbdc3] bg-clip-text text-transparent m-0">
+                    Classroom Camera Stream.
                   </h2>
                 </div>
 
-                <div className="flex items-center gap-2">
+                <div className="flex items-center gap-2.5">
                   <button
                     type="button"
                     onClick={() => {
@@ -788,33 +848,33 @@ export const TejprakashWorkspace: React.FC<TejprakashWorkspaceProps> = ({
                       setFacingMode(next);
                       startLocalCamera(next);
                     }}
-                    className="px-3 py-1.5 rounded-lg bg-white/10 hover:bg-white/15 border border-white/15 text-xs text-white cursor-pointer"
+                    className="px-4 py-2 rounded-[7px] bg-white/[0.07] hover:bg-white/[0.14] border border-white/[0.20] text-xs font-medium text-white/90 cursor-pointer transition-all"
                   >
-                    Flip Camera ({facingMode === 'environment' ? 'Rear' : 'Front'})
+                    Flip ({facingMode === 'environment' ? 'Rear' : 'Front'})
                   </button>
 
                   {localCameraActive ? (
                     <button
                       type="button"
                       onClick={stopLocalCamera}
-                      className="px-3 py-1.5 rounded-lg bg-rose-500/20 hover:bg-rose-500/30 border border-rose-400/30 text-xs text-rose-200 cursor-pointer"
+                      className="px-4 py-2 rounded-[7px] bg-rose-500/15 hover:bg-rose-500/25 border border-rose-400/35 text-xs font-medium text-rose-200 cursor-pointer transition-all"
                     >
-                      Stop Camera
+                      Pause Stream
                     </button>
                   ) : (
                     <button
                       type="button"
                       onClick={() => startLocalCamera(facingMode)}
-                      className="px-3.5 py-1.5 rounded-lg bg-emerald-400 text-slate-950 font-semibold text-xs cursor-pointer"
+                      className="px-4 py-2 rounded-[7px] bg-[#ededf0] hover:bg-[#36d67e] text-[#09090c] font-medium text-xs cursor-pointer transition-all"
                     >
-                      Grant Camera Permission
+                      Enable Camera
                     </button>
                   )}
                 </div>
               </div>
 
-              {/* Camera Viewport */}
-              <div className="relative w-full aspect-video rounded-xl overflow-hidden bg-black border border-white/15 flex items-center justify-center">
+              {/* Camera Viewport inside Recessed Glass Frame */}
+              <div className="relative w-full aspect-video rounded-[16px] overflow-hidden bg-[#050507] border border-white/[0.12] shadow-[inset_0_2px_20px_rgba(0,0,0,0.9)] flex items-center justify-center">
                 <video
                   ref={localVideoRef}
                   playsInline
@@ -830,126 +890,136 @@ export const TejprakashWorkspace: React.FC<TejprakashWorkspaceProps> = ({
                 />
 
                 {!localCameraActive && (
-                  <div className="text-center p-6 max-w-md">
-                    <p className="text-sm text-white/80 font-medium mb-2">
-                      Allow camera permission to stream classroom footage to the Controller
+                  <div className="text-center p-6 max-w-md space-y-3">
+                    <p className="text-sm text-white/75 font-normal leading-relaxed m-0">
+                      Grant camera permission on this device to stream live classroom video and AI occupancy count directly to the Controller.
                     </p>
                     {cameraError && (
-                      <p className="text-xs text-rose-400 mb-3">{cameraError}</p>
+                      <p className="text-xs text-rose-400 m-0">{cameraError}</p>
                     )}
                     <button
                       type="button"
                       onClick={() => startLocalCamera(facingMode)}
-                      className="px-5 py-2.5 rounded-xl bg-emerald-400 hover:bg-emerald-300 text-slate-950 font-semibold text-xs cursor-pointer"
+                      className="px-5 py-2.5 rounded-[7px] bg-[#ededf0] hover:bg-[#36d67e] text-[#09090c] font-medium text-xs cursor-pointer transition-all"
                     >
-                      Enable Smartphone Camera
+                      Grant Camera Permission
                     </button>
                   </div>
                 )}
 
-                {/* Live Overlay Badges */}
-                <div className="absolute top-3 left-3 flex items-center gap-2 bg-black/75 backdrop-blur-md px-3 py-1.5 rounded-lg border border-white/15">
+                {/* Glass HUD Pills */}
+                <div className="absolute top-3.5 left-3.5 flex items-center gap-2 bg-[#141418]/85 backdrop-blur-md px-3.5 py-1.5 rounded-full border border-white/[0.15]">
                   <span
-                    className={`w-2.5 h-2.5 rounded-full ${
-                      localCameraActive ? 'bg-emerald-400 animate-pulse' : 'bg-amber-400'
+                    className={`w-2 h-2 rounded-full ${
+                      localCameraActive ? 'bg-[#36d67e] animate-pulse' : 'bg-white/35'
                     }`}
                   />
-                  <span className="text-xs font-semibold text-white">
-                    {localCameraActive
-                      ? 'Streaming Live to Controller Feed'
-                      : 'Waiting for Camera Permission'}
+                  <span className="text-[11px] font-medium text-white/90">
+                    {localCameraActive ? 'Streaming Live to Controller' : 'Camera Standby'}
                   </span>
                 </div>
 
-                <div className="absolute top-3 right-3 bg-black/75 backdrop-blur-md px-3 py-1.5 rounded-lg border border-emerald-400/40">
-                  <span className="text-xs font-semibold text-emerald-300">
-                    Persons in View: {rawDetectedCount}
+                <div className="absolute top-3.5 right-3.5 bg-[#141418]/85 backdrop-blur-md px-3.5 py-1.5 rounded-full border border-[#36d67e]/45">
+                  <span className="text-xs font-medium text-[#36d67e]">
+                    Occupancy: {rawDetectedCount} {rawDetectedCount === 1 ? 'Person' : 'Persons'}
                   </span>
                 </div>
               </div>
 
-              {/* Status Footer on Phone */}
-              <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 mt-4">
-                <div className="rounded-xl bg-white/5 border border-white/10 p-3">
-                  <span className="text-[11px] text-white/50 block">AI Vision Status</span>
-                  <span className="text-sm font-semibold text-white">
+              {/* Bottom Telemetry Strip */}
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-3.5">
+                <div className={`${GLASS_SUBSLAB_CLASS} p-4`}>
+                  <span className="text-[10px] uppercase tracking-[0.18em] text-white/40 block">
+                    AI VISION ENGINE
+                  </span>
+                  <span className="text-sm font-medium text-white/90 mt-1 block">
                     {aiModelLoading
-                      ? 'Loading COCO-SSD...'
+                      ? 'Initializing COCO-SSD...'
                       : aiModelLoaded
-                      ? 'COCO-SSD Person Detection Active'
+                      ? 'Real-Time Person Detection'
                       : 'Ready'}
                   </span>
                 </div>
-                <div className="rounded-xl bg-white/5 border border-white/10 p-3">
-                  <span className="text-[11px] text-white/50 block">Fan 1 (Motor 1 — OUT1/OUT2)</span>
-                  <span className="text-sm font-semibold text-emerald-300">{fan1Speed}% Speed</span>
+                <div className={`${GLASS_SUBSLAB_CLASS} p-4`}>
+                  <span className="text-[10px] uppercase tracking-[0.18em] text-white/40 block">
+                    FAN 1 · MOTOR 1 (OUT1/OUT2)
+                  </span>
+                  <span className="text-sm font-medium text-[#36d67e] mt-1 block">
+                    {fan1Speed === 0 ? 'OFF (0%)' : `${fan1Speed}% Speed`}
+                  </span>
                 </div>
-                <div className="rounded-xl bg-white/5 border border-white/10 p-3">
-                  <span className="text-[11px] text-white/50 block">Fan 2 (Motor 2 — OUT3/OUT4)</span>
-                  <span className="text-sm font-semibold text-sky-300">{fan2Speed}% Speed</span>
+                <div className={`${GLASS_SUBSLAB_CLASS} p-4`}>
+                  <span className="text-[10px] uppercase tracking-[0.18em] text-white/40 block">
+                    FAN 2 · MOTOR 2 (OUT3/OUT4)
+                  </span>
+                  <span className="text-sm font-medium text-[#b9aee8] mt-1 block">
+                    {fan2Speed === 0 ? 'OFF (0%)' : `${fan2Speed}% Speed`}
+                  </span>
                 </div>
               </div>
             </div>
           </div>
         ) : (
-          /* ======================================================================
-           * VIEW 2: PASSWORD-PROTECTED CONTROLLER DASHBOARD
-           * Has two mode buttons ("Manually" & "AI Model") and shows the common
-           * live camera feed in BOTH modes, plus independent Fan 1 & Fan 2 controls.
-           * ====================================================================== */
-          <div className="space-y-6">
-            {/* Mode Selector Bar: Two prominent buttons — "Manually" vs "AI Model" */}
-            <div className="rounded-2xl bg-[#111622] border border-white/10 p-4 flex flex-wrap items-center justify-between gap-4">
+          /* ====================================================================
+           * VIEW 2: PASSWORD-PROTECTED SMOKED-GLASS CONTROLLER INTERIOR
+           * Fractured into sculpted Smoked-Glass Shards/Slabs matching the Hero
+           * ==================================================================== */
+          <div className="space-y-4 sm:space-y-5">
+            {/* Mode Switcher Smoked-Glass Slab ("Manually" vs "AI Model") */}
+            <div className={`${GLASS_SLAB_CLASS} px-6 py-4 flex flex-wrap items-center justify-between gap-4`}>
               <div>
-                <span className="text-[11px] font-semibold uppercase tracking-widest text-sky-400 block">
-                  CONTROLLER OPERATING MODE
+                <span className="text-[10px] font-medium uppercase tracking-[0.2em] text-white/40 block">
+                  THE TEJPRAKASH · OPERATING ARCHITECTURE
                 </span>
-                <p className="text-xs text-white/65 m-0 mt-0.5">
-                  Both modes share the live classroom camera feed below. Switch between Manual human decision or automatic AI Occupancy rules.
+                <p className="text-sm text-white/75 m-0 mt-0.5 font-normal">
+                  Live classroom vision is shared across both modes. Choose between direct human control or autonomous AI occupancy rules.
                 </p>
               </div>
 
-              <div className="flex items-center gap-2.5 bg-[#090c14] p-1.5 rounded-xl border border-white/10">
+              {/* Exact Landing-Page Style Pill Switcher */}
+              <div className="flex items-center gap-3">
                 <button
                   type="button"
                   data-testid="mode-btn-manual"
                   onClick={() => setControlMode('manual')}
-                  className={`px-5 py-2.5 rounded-lg text-xs font-semibold cursor-pointer transition-all ${
+                  className={`px-5 py-2.5 rounded-[7px] text-xs font-medium cursor-pointer transition-all ${
                     controlMode === 'manual'
-                      ? 'bg-sky-400 text-slate-950 shadow-sm'
-                      : 'bg-transparent text-white/70 hover:text-white'
+                      ? 'bg-[#ededf0] text-[#09090c] shadow-[0_0_25px_rgba(255,255,255,0.18)]'
+                      : 'bg-white/[0.06] hover:bg-white/[0.12] border border-white/[0.20] text-white/85'
                   }`}
                 >
-                  Manually (Human Control)
+                  Manually
                 </button>
 
                 <button
                   type="button"
                   data-testid="mode-btn-ai"
                   onClick={() => setControlMode('ai')}
-                  className={`px-5 py-2.5 rounded-lg text-xs font-semibold cursor-pointer transition-all ${
+                  className={`px-5 py-2.5 rounded-[7px] text-xs font-medium cursor-pointer transition-all ${
                     controlMode === 'ai'
-                      ? 'bg-emerald-400 text-slate-950 shadow-sm'
-                      : 'bg-transparent text-white/70 hover:text-white'
+                      ? 'bg-[#36d67e] text-[#09090c] shadow-[0_0_25px_rgba(54,214,126,0.28)]'
+                      : 'bg-white/[0.06] hover:bg-white/[0.12] border border-white/[0.20] text-white/85'
                   }`}
                 >
-                  AI Model (Auto Occupancy)
+                  AI Model
                 </button>
               </div>
             </div>
 
-            {/* Two-Column Main Grid: Left = Common Live Camera Feed, Right = Active Mode Controls */}
-            <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
-              {/* LEFT COLUMN (7 cols): Common Live Classroom Camera Feed (Visible in BOTH Modes) */}
-              <div className="lg:col-span-7 flex flex-col gap-4">
-                <div className="rounded-2xl bg-[#111622] border border-white/10 p-5 flex-1 flex flex-col">
-                  <div className="flex flex-wrap items-center justify-between gap-2 mb-3">
+            {/* Main Shard Grid: Left = Live Camera Vision Shard (7 cols), Right = Control Shards (5 cols) */}
+            <div className="grid grid-cols-1 lg:grid-cols-12 gap-4 sm:gap-5">
+              {/* LEFT SHARD (7 cols): Common Live Classroom Camera Feed */}
+              <div className={`lg:col-span-7 ${GLASS_SLAB_CLASS} p-5 sm:p-6 flex flex-col justify-between`}>
+                <div className="pointer-events-none absolute inset-x-10 top-0 h-[1px] bg-gradient-to-r from-transparent via-white/25 to-transparent" />
+
+                <div>
+                  <div className="flex flex-wrap items-center justify-between gap-3 mb-4">
                     <div>
-                      <span className="text-[10px] font-semibold uppercase tracking-widest text-emerald-400 block">
-                        COMMON LIVE CAMERA FEED ({controlMode === 'ai' ? 'AI MODEL MODE' : 'MANUAL MODE'})
+                      <span className="text-[10px] font-medium uppercase tracking-[0.2em] text-white/40 block">
+                        COMMON CLASSROOM VISION FEED · {controlMode === 'ai' ? 'AI MODEL' : 'MANUAL MODE'}
                       </span>
-                      <h2 className="text-base font-semibold text-white m-0">
-                        Classroom Vision Sensor · Room {roomId}
+                      <h2 className="text-xl font-medium tracking-[-0.03em] text-white/95 m-0 mt-0.5">
+                        Live Camera Telemetry
                       </h2>
                     </div>
 
@@ -959,25 +1029,24 @@ export const TejprakashWorkspace: React.FC<TejprakashWorkspaceProps> = ({
                           type="button"
                           data-testid="controller-start-cam-btn"
                           onClick={() => startLocalCamera('user')}
-                          className="px-3 py-1.5 rounded-lg bg-emerald-400/20 hover:bg-emerald-400/30 border border-emerald-400/40 text-xs font-semibold text-emerald-200 cursor-pointer"
+                          className="px-3.5 py-2 rounded-[7px] bg-white/[0.08] hover:bg-[#36d67e]/20 border border-white/[0.22] hover:border-[#36d67e] text-xs font-medium text-white/90 hover:text-[#36d67e] cursor-pointer transition-all"
                         >
-                          📷 Turn On Local Camera
+                          Use Device Camera
                         </button>
                       ) : (
                         <button
                           type="button"
                           onClick={stopLocalCamera}
-                          className="px-3 py-1.5 rounded-lg bg-rose-500/20 hover:bg-rose-500/30 border border-rose-400/40 text-xs font-semibold text-rose-200 cursor-pointer"
+                          className="px-3.5 py-2 rounded-[7px] bg-rose-500/15 hover:bg-rose-500/25 border border-rose-400/35 text-xs font-medium text-rose-200 cursor-pointer transition-all"
                         >
-                          Stop Local Camera
+                          Stop Device Camera
                         </button>
                       )}
                     </div>
                   </div>
 
                   {/* Video / Remote Stream Stage */}
-                  <div className="relative w-full aspect-video rounded-xl overflow-hidden bg-[#05070b] border border-white/15 flex items-center justify-center">
-                    {/* Local Camera Video */}
+                  <div className="relative w-full aspect-video rounded-[16px] overflow-hidden bg-[#050507] border border-white/[0.12] shadow-[inset_0_2px_24px_rgba(0,0,0,0.92)] flex items-center justify-center">
                     <video
                       ref={localVideoRef}
                       playsInline
@@ -988,7 +1057,6 @@ export const TejprakashWorkspace: React.FC<TejprakashWorkspaceProps> = ({
                       }`}
                     />
 
-                    {/* WebRTC Remote Video Stream from Smartphone */}
                     <video
                       ref={remoteVideoRef}
                       playsInline
@@ -999,7 +1067,6 @@ export const TejprakashWorkspace: React.FC<TejprakashWorkspaceProps> = ({
                       }`}
                     />
 
-                    {/* WebSocket Remote Frame Image from Smartphone */}
                     {!localCameraActive && !remoteStreamActive && remoteFrameUrl && (
                       <img
                         ref={remoteImgRef}
@@ -1009,7 +1076,6 @@ export const TejprakashWorkspace: React.FC<TejprakashWorkspaceProps> = ({
                       />
                     )}
 
-                    {/* Bounding Boxes Overlay Canvas */}
                     <canvas
                       ref={overlayCanvasRef}
                       className={`absolute inset-0 w-full h-full object-cover pointer-events-none ${
@@ -1017,15 +1083,14 @@ export const TejprakashWorkspace: React.FC<TejprakashWorkspaceProps> = ({
                       }`}
                     />
 
-                    {/* Empty State when neither Smartphone Camera nor Local Camera is active */}
                     {!hasAnyVideoFeed && (
-                      <div className="text-center p-6 max-w-md space-y-3">
-                        <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-white/5 border border-white/10 text-xs text-white/70">
-                          <span className="w-2 h-2 rounded-full bg-amber-400 animate-ping" />
-                          Waiting for Smartphone Camera Feed...
+                      <div className="text-center p-6 max-w-md space-y-3.5">
+                        <div className="inline-flex items-center gap-2 px-3.5 py-1 rounded-full bg-white/[0.05] border border-white/[0.12] text-[11px] text-white/70">
+                          <span className="w-2 h-2 rounded-full bg-[#b9aee8] animate-ping" />
+                          Awaiting Smartphone Camera Node...
                         </div>
-                        <p className="text-xs text-white/60 leading-relaxed m-0">
-                          Open this website on your smartphone and click <strong>Camera</strong> to stream live footage here automatically—or click below to use this laptop&apos;s camera right now.
+                        <p className="text-xs text-white/55 leading-relaxed m-0">
+                          Open this website on your smartphone and tap <strong className="text-white/85">Camera</strong> to project live classroom video here—or enable this device&apos;s camera below.
                         </p>
                         {cameraError && (
                           <p className="text-xs text-rose-400 m-0">{cameraError}</p>
@@ -1034,130 +1099,157 @@ export const TejprakashWorkspace: React.FC<TejprakashWorkspaceProps> = ({
                           <button
                             type="button"
                             onClick={() => startLocalCamera('user')}
-                            className="px-4 py-2 rounded-xl bg-emerald-400 hover:bg-emerald-300 text-slate-950 font-semibold text-xs cursor-pointer"
+                            className="px-5 py-2.5 rounded-[7px] bg-[#ededf0] hover:bg-[#36d67e] text-[#09090c] font-medium text-xs cursor-pointer transition-all"
                           >
-                            Use Laptop Camera Now
+                            Activate Camera Feed
                           </button>
                         </div>
                       </div>
                     )}
 
-                    {/* Top-Left Feed Source Badge */}
-                    <div className="absolute top-3 left-3 bg-black/75 backdrop-blur-md px-3 py-1.5 rounded-lg border border-white/15 flex items-center gap-2">
+                    {/* Top-Left Source Pill */}
+                    <div className="absolute top-3.5 left-3.5 bg-[#141418]/85 backdrop-blur-md px-3.5 py-1.5 rounded-full border border-white/[0.15] flex items-center gap-2">
                       <span
                         className={`w-2 h-2 rounded-full ${
-                          hasAnyVideoFeed ? 'bg-emerald-400 animate-pulse' : 'bg-white/40'
+                          hasAnyVideoFeed ? 'bg-[#36d67e] animate-pulse' : 'bg-white/35'
                         }`}
                       />
-                      <span className="text-[11px] font-medium text-white">
+                      <span className="text-[11px] font-medium text-white/85">
                         {localCameraActive
-                          ? 'Source: Local Camera (Live AI)'
+                          ? 'Local Camera Vision'
                           : remoteCameraOnline || remoteFrameUrl
-                          ? 'Source: Smartphone Camera Node (Live)'
-                          : 'Standby'}
+                          ? 'Smartphone Camera Stream'
+                          : 'Vision Standby'}
                       </span>
                     </div>
 
-                    {/* Top-Right Person Count Badge */}
+                    {/* Top-Right Occupancy Pill */}
                     <div
                       data-testid="live-person-count-badge"
-                      className="absolute top-3 right-3 bg-black/80 backdrop-blur-md px-3.5 py-1.5 rounded-lg border border-emerald-400/50"
+                      className="absolute top-3.5 right-3.5 bg-[#141418]/90 backdrop-blur-md px-3.5 py-1.5 rounded-full border border-[#36d67e]/50"
                     >
-                      <span className="text-xs font-bold text-emerald-300">
-                        Persons in Camera: {effectivePersonCount}
+                      <span className="text-xs font-medium text-[#36d67e]">
+                        Detected: {effectivePersonCount} {effectivePersonCount === 1 ? 'Person' : 'Persons'}
                       </span>
                     </div>
                   </div>
+                </div>
 
-                  {/* Live Motor Status Strip below video */}
-                  <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 mt-4">
-                    <div className="rounded-xl bg-[#090c14] border border-white/10 p-3">
-                      <span className="text-[10px] uppercase tracking-wider text-white/45 block">
-                        Active Mode
-                      </span>
-                      <span className="text-xs font-semibold text-white mt-0.5 block">
-                        {controlMode === 'ai' ? 'AI Auto Occupancy' : 'Manual Operator'}
-                      </span>
-                    </div>
+                {/* Bottom Smoked-Glass Telemetry Sub-Slabs with Spinning Fan Visualizers */}
+                <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 mt-5">
+                  <div className={`${GLASS_SUBSLAB_CLASS} p-3.5`}>
+                    <span className="text-[10px] uppercase tracking-[0.18em] text-white/40 block">
+                      MODE
+                    </span>
+                    <span className="text-xs font-medium text-white/95 mt-1 block">
+                      {controlMode === 'ai' ? 'AI Occupancy' : 'Manual Control'}
+                    </span>
+                  </div>
 
-                    <div className="rounded-xl bg-[#090c14] border border-white/10 p-3">
-                      <span className="text-[10px] uppercase tracking-wider text-white/45 block">
-                        Fan 1 (OUT1/OUT2 · D2/D3)
+                  <div className={`${GLASS_SUBSLAB_CLASS} p-3.5 flex items-center justify-between`}>
+                    <div>
+                      <span className="text-[10px] uppercase tracking-[0.18em] text-white/40 block">
+                        FAN 1 (D2/D3)
                       </span>
                       <span
                         data-testid="status-fan1-speed"
-                        className="text-sm font-bold text-emerald-300 mt-0.5 block"
+                        className="text-sm font-medium text-[#36d67e] mt-1 block"
                       >
-                        {fan1Speed === 0 ? 'OFF (0%)' : `${fan1Speed}% Speed`}
+                        {fan1Speed === 0 ? 'OFF (0%)' : `${fan1Speed}%`}
                       </span>
                     </div>
+                    {/* Animated Fan 1 Rotor */}
+                    <div
+                      className={`w-7 h-7 rounded-full border border-white/15 flex items-center justify-center ${
+                        fan1Speed > 0 ? 'animate-spin text-[#36d67e]' : 'text-white/25'
+                      }`}
+                      style={{
+                        animationDuration: fan1Speed >= 100 ? '0.45s' : fan1Speed > 0 ? '0.95s' : '0s',
+                      }}
+                    >
+                      ✦
+                    </div>
+                  </div>
 
-                    <div className="rounded-xl bg-[#090c14] border border-white/10 p-3">
-                      <span className="text-[10px] uppercase tracking-wider text-white/45 block">
-                        Fan 2 (OUT3/OUT4 · D4/D5)
+                  <div className={`${GLASS_SUBSLAB_CLASS} p-3.5 flex items-center justify-between`}>
+                    <div>
+                      <span className="text-[10px] uppercase tracking-[0.18em] text-white/40 block">
+                        FAN 2 (D4/D5)
                       </span>
                       <span
                         data-testid="status-fan2-speed"
-                        className="text-sm font-bold text-sky-300 mt-0.5 block"
+                        className="text-sm font-medium text-[#b9aee8] mt-1 block"
                       >
-                        {fan2Speed === 0 ? 'OFF (0%)' : `${fan2Speed}% Speed`}
+                        {fan2Speed === 0 ? 'OFF (0%)' : `${fan2Speed}%`}
                       </span>
                     </div>
+                    {/* Animated Fan 2 Rotor */}
+                    <div
+                      className={`w-7 h-7 rounded-full border border-white/15 flex items-center justify-center ${
+                        fan2Speed > 0 ? 'animate-spin text-[#b9aee8]' : 'text-white/25'
+                      }`}
+                      style={{
+                        animationDuration: fan2Speed >= 100 ? '0.45s' : fan2Speed > 0 ? '0.95s' : '0s',
+                      }}
+                    >
+                      ✦
+                    </div>
+                  </div>
 
-                    <div className="rounded-xl bg-[#090c14] border border-white/10 p-3">
-                      <span className="text-[10px] uppercase tracking-wider text-white/45 block">
-                        Serial TX → UNO
-                      </span>
-                      <code className="text-xs font-mono text-amber-300 mt-0.5 block">
-                        {lastTxCommand}
-                      </code>
-                    </div>
+                  <div className={`${GLASS_SUBSLAB_CLASS} p-3.5`}>
+                    <span className="text-[10px] uppercase tracking-[0.18em] text-white/40 block">
+                      SERIAL TX
+                    </span>
+                    <code className="text-xs font-mono text-white/85 mt-1 block">
+                      {lastTxCommand}
+                    </code>
                   </div>
                 </div>
               </div>
 
-              {/* RIGHT COLUMN (5 cols): Mode-Specific Control Panel (Manually vs AI Model) */}
-              <div className="lg:col-span-5 flex flex-col gap-4">
+              {/* RIGHT SHARDS (5 cols): Active Mode Control Slab + Hardware Link Slab */}
+              <div className="lg:col-span-5 flex flex-col gap-4 sm:gap-5">
                 {controlMode === 'manual' ? (
                   /* ----------------------------------------------------------------
-                   * MANUALLY MODE PANEL
-                   * Independent controls for Fan 1 (Motor 1) and Fan 2 (Motor 2)
+                   * MANUALLY MODE SMOKED-GLASS SLAB
                    * ---------------------------------------------------------------- */
                   <div
                     data-testid="manual-control-panel"
-                    className="rounded-2xl bg-[#111622] border border-sky-400/30 p-5 space-y-5"
+                    className={`${GLASS_SLAB_CLASS} p-5 sm:p-6 space-y-5 flex-1`}
                   >
+                    <div className="pointer-events-none absolute inset-x-10 top-0 h-[1px] bg-gradient-to-r from-transparent via-[#b9aee8]/45 to-transparent" />
+
                     <div>
-                      <span className="text-[10px] font-semibold uppercase tracking-widest text-sky-400 block">
-                        MANUAL HUMAN CONTROL MODE
+                      <span className="text-[10px] font-medium uppercase tracking-[0.2em] text-white/40 block">
+                        MANUAL OPERATOR AUTHORITY
                       </span>
-                      <h3 className="text-lg font-semibold text-white m-0 mt-0.5">
+                      <h3 className="text-xl font-medium tracking-[-0.03em] text-white/95 m-0 mt-1">
                         Independent Dual-Fan Control
                       </h3>
-                      <p className="text-xs text-white/60 m-0 mt-1">
-                        Watch the live camera feed and control Fan 1 (Motor 1) and Fan 2 (Motor 2) independently.
+                      <p className="text-xs text-white/55 m-0 mt-1 leading-relaxed">
+                        Inspect the live classroom feed and set Fan 1 (Motor 1) and Fan 2 (Motor 2) speeds independently.
                       </p>
                     </div>
 
-                    {/* FAN 1 (MOTOR 1) INDEPENDENT CARD */}
-                    <div className="rounded-xl bg-[#090c14] border border-white/10 p-4 space-y-3">
+                    {/* FAN 1 (MOTOR 1) SUB-SLAB */}
+                    <div className={`${GLASS_SUBSLAB_CLASS} p-4 space-y-3`}>
                       <div className="flex items-center justify-between">
                         <div>
-                          <span className="text-xs font-bold text-white block">
-                            Fan 1 — Motor 1 (OUT1 &amp; OUT2)
+                          <span className="text-xs font-medium text-white/95 block">
+                            Fan 1 · Motor 1 (OUT1 &amp; OUT2)
                           </span>
-                          <span className="text-[11px] text-white/45">
-                            Arduino Pins: IN1 → D2, IN2 → D3 (PWM)
+                          <span className="text-[11px] text-white/40">
+                            Pins: IN1 → D2 · IN2 → D3 (Hardware PWM)
                           </span>
                         </div>
                         <span
-                          className={`px-2.5 py-1 rounded-md text-xs font-bold ${
+                          className={`px-2.5 py-1 rounded-full text-[11px] font-medium ${
                             fan1Speed > 0
-                              ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/40'
-                              : 'bg-white/5 text-white/50 border border-white/10'
+                              ? 'bg-[#36d67e]/15 text-[#36d67e] border border-[#36d67e]/40'
+                              : 'bg-white/[0.04] text-white/45 border border-white/10'
                           }`}
                         >
-                          {fan1Speed === 0 ? 'OFF (0%)' : `ON · ${fan1Speed}%`}
+                          {fan1Speed === 0 ? 'OFF (0%)' : `${fan1Speed}% Speed`}
                         </span>
                       </div>
 
@@ -1172,10 +1264,10 @@ export const TejprakashWorkspace: React.FC<TejprakashWorkspaceProps> = ({
                             type="button"
                             data-testid={`manual-fan1-${btn.val}`}
                             onClick={() => applyManualFanChange(btn.val, fan2Speed)}
-                            className={`py-2 rounded-lg text-xs font-semibold cursor-pointer border transition-all ${
+                            className={`py-2.5 rounded-[7px] text-xs font-medium cursor-pointer border transition-all ${
                               fan1Speed === btn.val
-                                ? 'bg-emerald-400 text-slate-950 border-emerald-300'
-                                : 'bg-white/5 hover:bg-white/10 text-white/80 border-white/10'
+                                ? 'bg-[#ededf0] text-[#09090c] border-white'
+                                : 'bg-white/[0.04] hover:bg-white/[0.10] text-white/80 border-white/[0.12]'
                             }`}
                           >
                             {btn.label}
@@ -1184,25 +1276,25 @@ export const TejprakashWorkspace: React.FC<TejprakashWorkspaceProps> = ({
                       </div>
                     </div>
 
-                    {/* FAN 2 (MOTOR 2) INDEPENDENT CARD */}
-                    <div className="rounded-xl bg-[#090c14] border border-white/10 p-4 space-y-3">
+                    {/* FAN 2 (MOTOR 2) SUB-SLAB */}
+                    <div className={`${GLASS_SUBSLAB_CLASS} p-4 space-y-3`}>
                       <div className="flex items-center justify-between">
                         <div>
-                          <span className="text-xs font-bold text-white block">
-                            Fan 2 — Motor 2 (OUT3 &amp; OUT4)
+                          <span className="text-xs font-medium text-white/95 block">
+                            Fan 2 · Motor 2 (OUT3 &amp; OUT4)
                           </span>
-                          <span className="text-[11px] text-white/45">
-                            Arduino Pins: IN3 → D4, IN4 → D5 (PWM)
+                          <span className="text-[11px] text-white/40">
+                            Pins: IN3 → D4 · IN4 → D5 (Hardware PWM)
                           </span>
                         </div>
                         <span
-                          className={`px-2.5 py-1 rounded-md text-xs font-bold ${
+                          className={`px-2.5 py-1 rounded-full text-[11px] font-medium ${
                             fan2Speed > 0
-                              ? 'bg-sky-500/20 text-sky-300 border border-sky-500/40'
-                              : 'bg-white/5 text-white/50 border border-white/10'
+                              ? 'bg-[#b9aee8]/15 text-[#b9aee8] border border-[#b9aee8]/40'
+                              : 'bg-white/[0.04] text-white/45 border border-white/10'
                           }`}
                         >
-                          {fan2Speed === 0 ? 'OFF (0%)' : `ON · ${fan2Speed}%`}
+                          {fan2Speed === 0 ? 'OFF (0%)' : `${fan2Speed}% Speed`}
                         </span>
                       </div>
 
@@ -1217,10 +1309,10 @@ export const TejprakashWorkspace: React.FC<TejprakashWorkspaceProps> = ({
                             type="button"
                             data-testid={`manual-fan2-${btn.val}`}
                             onClick={() => applyManualFanChange(fan1Speed, btn.val)}
-                            className={`py-2 rounded-lg text-xs font-semibold cursor-pointer border transition-all ${
+                            className={`py-2.5 rounded-[7px] text-xs font-medium cursor-pointer border transition-all ${
                               fan2Speed === btn.val
-                                ? 'bg-sky-400 text-slate-950 border-sky-300'
-                                : 'bg-white/5 hover:bg-white/10 text-white/80 border-white/10'
+                                ? 'bg-[#ededf0] text-[#09090c] border-white'
+                                : 'bg-white/[0.04] hover:bg-white/[0.10] text-white/80 border-white/[0.12]'
                             }`}
                           >
                             {btn.label}
@@ -1229,33 +1321,33 @@ export const TejprakashWorkspace: React.FC<TejprakashWorkspaceProps> = ({
                       </div>
                     </div>
 
-                    {/* Quick Isolated Motor Combinations (Verifies Bug #1 Fix) */}
-                    <div className="space-y-2">
-                      <span className="text-[11px] font-semibold uppercase tracking-wider text-white/50 block">
-                        Quick Hardware Combinations
+                    {/* Direct Combination Presets */}
+                    <div className="space-y-2 pt-1">
+                      <span className="text-[10px] font-medium uppercase tracking-[0.2em] text-white/40 block">
+                        DIRECT COMBINATIONS
                       </span>
                       <div className="grid grid-cols-2 gap-2">
                         <button
                           type="button"
                           data-testid="only-fan1-btn"
                           onClick={() => applyManualFanChange(100, 0)}
-                          className="py-2 px-3 rounded-lg bg-emerald-500/15 hover:bg-emerald-500/25 border border-emerald-400/30 text-xs font-semibold text-emerald-200 cursor-pointer"
+                          className="py-2.5 px-3 rounded-[7px] bg-white/[0.05] hover:bg-[#36d67e]/20 border border-white/[0.14] hover:border-[#36d67e] text-xs font-medium text-white/90 hover:text-[#36d67e] cursor-pointer transition-all"
                         >
-                          Only Fan 1 ON (Motor 1)
+                          Only Fan 1 ON
                         </button>
                         <button
                           type="button"
                           data-testid="only-fan2-btn"
                           onClick={() => applyManualFanChange(0, 100)}
-                          className="py-2 px-3 rounded-lg bg-sky-500/15 hover:bg-sky-500/25 border border-sky-400/30 text-xs font-semibold text-sky-200 cursor-pointer"
+                          className="py-2.5 px-3 rounded-[7px] bg-white/[0.05] hover:bg-[#b9aee8]/20 border border-white/[0.14] hover:border-[#b9aee8] text-xs font-medium text-white/90 hover:text-[#dcd6f7] cursor-pointer transition-all"
                         >
-                          Only Fan 2 ON (Motor 2)
+                          Only Fan 2 ON
                         </button>
                         <button
                           type="button"
                           data-testid="both-fans-on-btn"
                           onClick={() => applyManualFanChange(100, 100)}
-                          className="py-2 px-3 rounded-lg bg-amber-500/15 hover:bg-amber-500/25 border border-amber-400/30 text-xs font-semibold text-amber-200 cursor-pointer"
+                          className="py-2.5 px-3 rounded-[7px] bg-white/[0.05] hover:bg-white/[0.14] border border-white/[0.14] text-xs font-medium text-white/90 cursor-pointer transition-all"
                         >
                           Both Fans ON (100%)
                         </button>
@@ -1263,7 +1355,7 @@ export const TejprakashWorkspace: React.FC<TejprakashWorkspaceProps> = ({
                           type="button"
                           data-testid="both-fans-off-btn"
                           onClick={() => applyManualFanChange(0, 0)}
-                          className="py-2 px-3 rounded-lg bg-rose-500/15 hover:bg-rose-500/25 border border-rose-400/30 text-xs font-semibold text-rose-200 cursor-pointer"
+                          className="py-2.5 px-3 rounded-[7px] bg-white/[0.05] hover:bg-rose-500/20 border border-white/[0.14] hover:border-rose-400/40 text-xs font-medium text-white/75 hover:text-rose-200 cursor-pointer transition-all"
                         >
                           All Fans OFF (0%)
                         </button>
@@ -1272,48 +1364,49 @@ export const TejprakashWorkspace: React.FC<TejprakashWorkspaceProps> = ({
                   </div>
                 ) : (
                   /* ----------------------------------------------------------------
-                   * AI MODEL MODE PANEL
-                   * Automatic Occupancy Rules (0, 1, 2, 3, 4+ Persons)
+                   * AI MODEL MODE SMOKED-GLASS SLAB
                    * ---------------------------------------------------------------- */
                   <div
                     data-testid="ai-control-panel"
-                    className="rounded-2xl bg-[#111622] border border-emerald-400/30 p-5 space-y-4"
+                    className={`${GLASS_SLAB_CLASS} p-5 sm:p-6 space-y-4 flex-1`}
                   >
+                    <div className="pointer-events-none absolute inset-x-10 top-0 h-[1px] bg-gradient-to-r from-transparent via-[#36d67e]/45 to-transparent" />
+
                     <div>
-                      <span className="text-[10px] font-semibold uppercase tracking-widest text-emerald-400 block">
-                        AUTONOMOUS AI MODEL MODE
+                      <span className="text-[10px] font-medium uppercase tracking-[0.2em] text-white/40 block">
+                        AUTONOMOUS AI MODEL
                       </span>
-                      <h3 className="text-lg font-semibold text-white m-0 mt-0.5">
-                        Predefined Occupancy Speed Rules
+                      <h3 className="text-xl font-medium tracking-[-0.03em] text-white/95 m-0 mt-1">
+                        Occupancy Speed Matrix
                       </h3>
-                      <p className="text-xs text-white/60 m-0 mt-1">
-                        AI counts people in the classroom camera feed and automatically drives Motor 1 and Motor 2.
+                      <p className="text-xs text-white/55 m-0 mt-1 leading-relaxed">
+                        Classroom headcount automatically scales Motor 1 and Motor 2 speed to eliminate electrical waste.
                       </p>
                     </div>
 
-                    {/* Active AI Decision Banner */}
-                    <div className="rounded-xl bg-emerald-500/10 border border-emerald-400/35 p-3.5">
+                    {/* Active AI Decision Sub-Slab */}
+                    <div className={`${GLASS_SUBSLAB_CLASS} p-4 border-[#36d67e]/35`}>
                       <div className="flex items-center justify-between mb-1">
-                        <span className="text-xs font-bold text-emerald-300">
+                        <span className="text-xs font-medium text-[#36d67e]">
                           {currentAiDecision.ruleTitle}
                         </span>
-                        <span className="text-[11px] font-semibold px-2 py-0.5 rounded bg-emerald-400/20 text-emerald-200">
-                          {aiCountOverride === null ? 'Live Camera AI' : 'Manual Test Count'}
+                        <span className="text-[10px] uppercase tracking-[0.14em] px-2.5 py-0.5 rounded-full bg-white/[0.06] text-white/75">
+                          {aiCountOverride === null ? 'Live Vision AI' : 'Simulation'}
                         </span>
                       </div>
-                      <p className="text-xs text-white/80 m-0">
+                      <p className="text-xs text-white/75 m-0 leading-relaxed">
                         {currentAiDecision.ruleDescription}
                       </p>
                     </div>
 
-                    {/* All 5 Rules Table (Highlights currently active rule) */}
+                    {/* 5 Predefined Parameters Matrix */}
                     <div className="space-y-1.5">
                       {[
-                        { count: 0, title: '0 Persons', desc: 'Both Motors OFF (0%) · Lights OFF' },
-                        { count: 1, title: '1 Person', desc: 'Motor 1: 50% Speed · Motor 2: OFF' },
-                        { count: 2, title: '2 Persons', desc: 'Motor 1: 100% Speed · Motor 2: OFF' },
-                        { count: 3, title: '3 Persons', desc: 'Motor 1: 50% · Motor 2: 50% Speed' },
-                        { count: 4, title: '4+ Persons', desc: 'Motor 1: 100% · Motor 2: 100% Speed' },
+                        { count: 0, title: '0 Persons', desc: 'Fan 1: OFF · Fan 2: OFF' },
+                        { count: 1, title: '1 Person', desc: 'Fan 1: 50% · Fan 2: OFF' },
+                        { count: 2, title: '2 Persons', desc: 'Fan 1: 100% · Fan 2: OFF' },
+                        { count: 3, title: '3 Persons', desc: 'Fan 1: 50% · Fan 2: 50%' },
+                        { count: 4, title: '4+ Persons', desc: 'Fan 1: 100% · Fan 2: 100%' },
                       ].map((rule) => {
                         const isCurrent =
                           rule.count === 4
@@ -1322,35 +1415,35 @@ export const TejprakashWorkspace: React.FC<TejprakashWorkspaceProps> = ({
                         return (
                           <div
                             key={rule.count}
-                            className={`flex items-center justify-between px-3 py-2 rounded-lg border text-xs transition-all ${
+                            className={`flex items-center justify-between px-3.5 py-2.5 rounded-[10px] border text-xs transition-all ${
                               isCurrent
-                                ? 'bg-emerald-400/20 border-emerald-400 text-white font-semibold'
-                                : 'bg-[#090c14] border-white/8 text-white/55'
+                                ? 'bg-white/[0.10] border-[#36d67e]/60 text-white font-medium shadow-[0_0_20px_rgba(54,214,126,0.12)]'
+                                : 'bg-[#0a0a0e]/80 border-white/[0.06] text-white/50'
                             }`}
                           >
                             <span>{rule.title}</span>
-                            <span>{rule.desc}</span>
+                            <span className={isCurrent ? 'text-[#36d67e]' : ''}>{rule.desc}</span>
                           </div>
                         );
                       })}
                     </div>
 
-                    {/* Live Camera AI vs Demo Count Tester (for Viva / Hardware Testing) */}
-                    <div className="pt-2 border-t border-white/10 space-y-2">
+                    {/* Occupancy Simulation / Live Camera Selector */}
+                    <div className="pt-2 border-t border-white/[0.08] space-y-2.5">
                       <div className="flex items-center justify-between">
-                        <span className="text-[11px] font-semibold text-white/60">
-                          Test Occupancy Count (or keep on Auto Camera AI):
+                        <span className="text-[11px] text-white/50">
+                          Occupancy Source:
                         </span>
                         <button
                           type="button"
                           onClick={() => setAiCountOverride(null)}
-                          className={`px-2.5 py-1 rounded text-[11px] font-semibold cursor-pointer ${
+                          className={`px-3 py-1 rounded-[6px] text-[11px] font-medium cursor-pointer transition-all ${
                             aiCountOverride === null
-                              ? 'bg-emerald-400 text-slate-950'
-                              : 'bg-white/10 text-white/70 hover:text-white'
+                              ? 'bg-[#ededf0] text-[#09090c]'
+                              : 'bg-white/[0.06] text-white/70 hover:text-white'
                           }`}
                         >
-                          Auto Live Camera ({rawDetectedCount})
+                          Live Camera AI ({rawDetectedCount})
                         </button>
                       </div>
 
@@ -1361,13 +1454,13 @@ export const TejprakashWorkspace: React.FC<TejprakashWorkspaceProps> = ({
                             type="button"
                             data-testid={`ai-sim-count-${num}`}
                             onClick={() => setAiCountOverride(num)}
-                            className={`py-2 rounded-lg text-xs font-semibold cursor-pointer border transition-all ${
+                            className={`py-2 rounded-[7px] text-xs font-medium cursor-pointer border transition-all ${
                               aiCountOverride === num
-                                ? 'bg-emerald-400 text-slate-950 border-emerald-300'
-                                : 'bg-[#090c14] hover:bg-white/10 text-white/75 border-white/10'
+                                ? 'bg-[#36d67e] text-[#09090c] border-[#36d67e]'
+                                : 'bg-white/[0.04] hover:bg-white/[0.10] text-white/75 border-white/[0.10]'
                             }`}
                           >
-                            {num === 4 ? '4+ Pers' : `${num} Pers`}
+                            {num === 4 ? '4+' : `${num}P`}
                           </button>
                         ))}
                       </div>
@@ -1375,45 +1468,147 @@ export const TejprakashWorkspace: React.FC<TejprakashWorkspaceProps> = ({
                   </div>
                 )}
 
-                {/* Arduino UNO & L298N Hardware Status Card */}
-                <div className="rounded-2xl bg-[#111622] border border-white/10 p-4 space-y-2.5">
+                {/* Arduino UNO & L298N Hardware Telemetry Slab */}
+                <div className={`${GLASS_SLAB_CLASS} p-4 sm:p-5 space-y-2.5`}>
                   <div className="flex items-center justify-between">
-                    <span className="text-xs font-semibold text-white">
-                      Arduino UNO SMD + L298N Hardware Link
+                    <span className="text-[11px] font-medium uppercase tracking-[0.18em] text-white/45">
+                      ARDUINO UNO SMD · L298N BRIDGE
                     </span>
                     <span
-                      className={`text-[11px] font-medium ${
-                        serialConnected ? 'text-emerald-300' : 'text-amber-300'
+                      className={`text-xs font-medium ${
+                        serialConnected ? 'text-[#36d67e]' : 'text-white/55'
                       }`}
                     >
                       {serialStatus}
                     </span>
                   </div>
-                  <div className="text-[11px] text-white/55 flex flex-wrap items-center justify-between gap-2 bg-[#090c14] px-3 py-2 rounded-lg border border-white/8">
-                    <span>Pins: D2→IN1, D3(PWM)→IN2, D4→IN3, D5(PWM)→IN4</span>
-                    <span className="font-mono text-emerald-300">RX: {lastArduinoReply}</span>
+                  <div className={`${GLASS_SUBSLAB_CLASS} px-3.5 py-2.5 text-[11px] text-white/55 flex flex-wrap items-center justify-between gap-2`}>
+                    <span>D2→IN1 · D3(PWM)→IN2 · D4→IN3 · D5(PWM)→IN4</span>
+                    <span className="font-mono text-[#36d67e]">RX: {lastArduinoReply}</span>
                   </div>
                 </div>
               </div>
             </div>
           </div>
         )}
-      </main>
+      </div>
 
-      {/* Modal: Complete Arduino IDE (.ino) Code with Anti-Jerking Fix */}
+      {/* ====================================================================
+       * MODAL 1: CHANGE ADMIN PASSWORD (Smoked-Glass Slab)
+       * ==================================================================== */}
+      {showPasswordModal && (
+        <div
+          data-testid="change-password-modal"
+          className="fixed inset-0 z-50 bg-black/75 backdrop-blur-md flex items-center justify-center p-4"
+        >
+          <div className={`${GLASS_SLAB_CLASS} w-full max-w-md p-6 sm:p-7 space-y-5`}>
+            <div className="pointer-events-none absolute inset-x-8 top-0 h-[1px] bg-gradient-to-r from-transparent via-[#b9aee8]/50 to-transparent" />
+
+            <div className="flex items-center justify-between">
+              <div>
+                <span className="text-[10px] font-medium uppercase tracking-[0.2em] text-white/40 block">
+                  SECURITY CREDENTIALS
+                </span>
+                <h3 className="text-lg font-medium text-white/95 m-0 mt-0.5">
+                  Change Controller Password
+                </h3>
+              </div>
+              <button
+                type="button"
+                onClick={() => setShowPasswordModal(false)}
+                className="px-2.5 py-1 rounded-[6px] bg-white/[0.06] hover:bg-white/[0.12] text-xs text-white/70 hover:text-white cursor-pointer"
+              >
+                ✕
+              </button>
+            </div>
+
+            <form onSubmit={handleAdminPasswordChangeSubmit} className="space-y-3.5">
+              <div>
+                <label className="block text-[11px] text-white/60 mb-1">
+                  Current Password
+                </label>
+                <input
+                  type="password"
+                  data-testid="current-password-input"
+                  value={currentPwdInput}
+                  onChange={(e) => setCurrentPwdInput(e.target.value)}
+                  placeholder="Enter current password"
+                  className="w-full px-3.5 py-2.5 rounded-[10px] bg-[#09090d] border border-white/[0.14] text-sm text-white placeholder-white/30 focus:outline-none focus:border-[#b9aee8]"
+                />
+              </div>
+
+              <div>
+                <label className="block text-[11px] text-white/60 mb-1">
+                  New Password
+                </label>
+                <input
+                  type="password"
+                  data-testid="new-password-input"
+                  value={newPwdInput}
+                  onChange={(e) => setNewPwdInput(e.target.value)}
+                  placeholder="Enter new password"
+                  className="w-full px-3.5 py-2.5 rounded-[10px] bg-[#09090d] border border-white/[0.14] text-sm text-white placeholder-white/30 focus:outline-none focus:border-[#36d67e]"
+                />
+              </div>
+
+              <div>
+                <label className="block text-[11px] text-white/60 mb-1">
+                  Confirm New Password
+                </label>
+                <input
+                  type="password"
+                  data-testid="confirm-password-input"
+                  value={confirmPwdInput}
+                  onChange={(e) => setConfirmPwdInput(e.target.value)}
+                  placeholder="Re-enter new password"
+                  className="w-full px-3.5 py-2.5 rounded-[10px] bg-[#09090d] border border-white/[0.14] text-sm text-white placeholder-white/30 focus:outline-none focus:border-[#36d67e]"
+                />
+              </div>
+
+              {pwdChangeError && (
+                <p className="text-xs text-rose-400 m-0">{pwdChangeError}</p>
+              )}
+              {pwdChangeSuccess && (
+                <p className="text-xs text-[#36d67e] m-0">{pwdChangeSuccess}</p>
+              )}
+
+              <div className="flex items-center justify-end gap-2.5 pt-2">
+                <button
+                  type="button"
+                  onClick={() => setShowPasswordModal(false)}
+                  className="px-4 py-2 rounded-[7px] bg-white/[0.06] hover:bg-white/[0.12] border border-white/[0.14] text-xs font-medium text-white/80 cursor-pointer"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  data-testid="save-new-password-btn"
+                  className="px-5 py-2 rounded-[7px] bg-[#ededf0] hover:bg-[#36d67e] text-[#09090c] font-medium text-xs cursor-pointer transition-all"
+                >
+                  Save New Password
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* ====================================================================
+       * MODAL 2: ARDUINO IDE (.ino) FIRMWARE CODE
+       * ==================================================================== */}
       {showArduinoCodeModal && (
         <div
           data-testid="arduino-code-modal"
-          className="fixed inset-0 z-50 bg-black/75 backdrop-blur-sm flex items-center justify-center p-4"
+          className="fixed inset-0 z-50 bg-black/75 backdrop-blur-md flex items-center justify-center p-4"
         >
-          <div className="w-full max-w-3xl max-h-[88vh] flex flex-col rounded-2xl bg-[#0e131f] border border-white/20 overflow-hidden shadow-2xl">
-            <div className="px-5 py-4 bg-[#141b2d] border-b border-white/10 flex items-center justify-between">
+          <div className={`${GLASS_SLAB_CLASS} w-full max-w-3xl max-h-[86vh] flex flex-col overflow-hidden`}>
+            <div className="px-6 py-4 border-b border-white/[0.10] flex items-center justify-between">
               <div>
-                <h3 className="text-base font-semibold text-white m-0">
-                  tejprakash_arduino.ino — Anti-Jerking Firmware (Arduino UNO SMD)
+                <h3 className="text-base font-medium text-white/95 m-0">
+                  tejprakash_arduino.ino — Arduino UNO SMD Firmware
                 </h3>
-                <p className="text-xs text-white/60 m-0 mt-0.5">
-                  Paste directly into Arduino IDE 2.3.10 and click Upload. No rewiring needed (uses D2, D3, D4, D5).
+                <p className="text-xs text-white/50 m-0 mt-0.5">
+                  Uses D2, D3 (PWM), D4, D5 (PWM) with soft-start ramp to prevent 12V 1A adapter overload.
                 </p>
               </div>
               <div className="flex items-center gap-2">
@@ -1424,21 +1619,21 @@ export const TejprakashWorkspace: React.FC<TejprakashWorkspaceProps> = ({
                     setCopiedCode(true);
                     window.setTimeout(() => setCopiedCode(false), 2000);
                   }}
-                  className="px-4 py-2 rounded-lg bg-emerald-400 hover:bg-emerald-300 text-slate-950 font-semibold text-xs cursor-pointer"
+                  className="px-4 py-2 rounded-[7px] bg-[#ededf0] hover:bg-[#36d67e] text-[#09090c] font-medium text-xs cursor-pointer transition-all"
                 >
-                  {copiedCode ? '✓ Copied to Clipboard!' : 'Copy Full .ino Code'}
+                  {copiedCode ? '✓ Copied' : 'Copy .ino Code'}
                 </button>
                 <button
                   type="button"
                   onClick={() => setShowArduinoCodeModal(false)}
-                  className="px-3 py-2 rounded-lg bg-white/10 hover:bg-white/15 text-xs text-white cursor-pointer"
+                  className="px-3 py-2 rounded-[7px] bg-white/[0.07] hover:bg-white/[0.14] text-xs text-white cursor-pointer"
                 >
-                  ✕ Close
+                  ✕
                 </button>
               </div>
             </div>
 
-            <pre className="p-5 text-xs font-mono text-emerald-200 overflow-y-auto flex-1 m-0 leading-relaxed bg-[#070a10]">
+            <pre className="p-5 text-xs font-mono text-[#36d67e]/90 overflow-y-auto flex-1 m-0 leading-relaxed bg-[#07070a]">
               {ARDUINO_INO_CODE}
             </pre>
           </div>

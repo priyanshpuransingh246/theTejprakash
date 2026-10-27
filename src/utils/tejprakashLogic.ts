@@ -116,6 +116,39 @@ export function percentToSafeAdapterPwm(percent: number, maxSafePwm = 118, minRu
   return Math.round(mapped);
 }
 
+export const ADMIN_PASSWORD_STORAGE_KEY = 'tejprakash_admin_password_v1';
+export const DEFAULT_ADMIN_PASSWORD = 'admin123';
+
+export function getStoredAdminPassword(): string {
+  try {
+    if (typeof window !== 'undefined' && window.localStorage) {
+      const saved = window.localStorage.getItem(ADMIN_PASSWORD_STORAGE_KEY);
+      if (saved && saved.trim().length > 0) {
+        return saved.trim();
+      }
+    }
+  } catch {
+    // Ignore storage access errors
+  }
+  return DEFAULT_ADMIN_PASSWORD;
+}
+
+export function setStoredAdminPassword(newPassword: string): void {
+  const cleaned = newPassword.trim();
+  if (!cleaned) return;
+  try {
+    if (typeof window !== 'undefined' && window.localStorage) {
+      window.localStorage.setItem(ADMIN_PASSWORD_STORAGE_KEY, cleaned);
+    }
+  } catch {
+    // Ignore storage access errors
+  }
+}
+
+export function verifyAdminPassword(input: string): boolean {
+  return input.trim() === getStoredAdminPassword();
+}
+
 /**
  * Complete Arduino UNO SMD (.ino) firmware source code for The Tejprakash.
  * Matches the user's exact physical wiring:
