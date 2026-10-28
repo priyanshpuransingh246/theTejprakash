@@ -24,9 +24,8 @@ interface CocoSsdModel {
 }
 
 interface TfGlobal {
-  setBackend?: (backendName: string) => Promise<boolean>;
   ready?: () => Promise<void>;
-  getBackend?: () => string;
+  nextFrame?: () => Promise<void>;
 }
 
 declare global {
@@ -40,6 +39,7 @@ declare global {
 
 let modelPromise: Promise<CocoSsdModel | null> | null = null;
 let internalCanvas: HTMLCanvasElement | null = null;
+let isDetectingNow = false;
 
 function loadScriptOnce(src: string): Promise<void> {
   return new Promise((resolve, reject) => {
@@ -77,17 +77,8 @@ export async function getCocoSsdModel(): Promise<CocoSsdModel | null> {
       if (!window.tf) {
         await loadScriptOnce('https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.20.0/dist/tf.min.js');
       }
-      // Force CPU backend so TensorFlow.js NEVER opens a competing WebGL context
-      // that can black out the hardware <video> decoder or clash with Three.js WebGL2
-      if (window.tf && typeof window.tf.setBackend === 'function') {
-        try {
-          await window.tf.setBackend('cpu');
-          if (typeof window.tf.ready === 'function') {
-            await window.tf.ready();
-          }
-        } catch {
-          // Ignore backend switch errors
-        }
+      if (window.tf && typeof window.tf.ready === 'function') {
+        await window.tf.ready();
       }
       if (!window.cocoSsd) {
         await loadScriptOnce(
@@ -110,12 +101,14 @@ export async function getCocoSsdModel(): Promise<CocoSsdModel | null> {
 export async function detectPersonsInElement(
   el: HTMLVideoElement | HTMLImageElement | HTMLCanvasElement,
   minScore = 0.42
-): Promise<{ count: number; boxes: DetectedPersonBox[] }> {
+): Promise<{ count: number; boxes: DetectedPersonBox[] } | null> {
+  if (isDetectingNow) return null;
   const model = await getCocoSsdModel();
   if (!model) {
     return { count: 0, boxes: [] };
   }
 
+  isDetectingNow = true;
   try {
     let origW = 320;
     let origH = 240;
@@ -169,5 +162,7 @@ export async function detectPersonsInElement(
     };
   } catch {
     return { count: 0, boxes: [] };
+  } finally {
+    isDetectingNow = false;
   }
 }

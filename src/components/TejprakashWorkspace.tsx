@@ -71,8 +71,7 @@ export const TejprakashWorkspace: React.FC<TejprakashWorkspaceProps> = ({
   const [facingMode, setFacingMode] = useState<'environment' | 'user'>('environment');
   const [cameraError, setCameraError] = useState<string | null>(null);
 
-  // Remote camera frame received from Smartphone Camera Node
-  const [remoteFrameUrl, setRemoteFrameUrl] = useState<string | null>(null);
+  // Remote camera state received from Smartphone Camera Node
   const [remoteCameraOnline, setRemoteCameraOnline] = useState(false);
 
   // AI Person Detection State
@@ -80,7 +79,6 @@ export const TejprakashWorkspace: React.FC<TejprakashWorkspaceProps> = ({
   const [aiModelLoading, setAiModelLoading] = useState(false);
   const [rawDetectedCount, setRawDetectedCount] = useState(0);
   const [stablePersonCount, setStablePersonCount] = useState(0);
-  const [detectedBoxes, setDetectedBoxes] = useState<DetectedPersonBox[]>([]);
   const [aiCountOverride, setAiCountOverride] = useState<number | null>(null);
 
   // Arduino Web Serial State
@@ -104,7 +102,6 @@ export const TejprakashWorkspace: React.FC<TejprakashWorkspaceProps> = ({
   const remoteImgRef = useRef<HTMLImageElement | null>(null);
   const overlayCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const captureCanvasRef = useRef<HTMLCanvasElement | null>(null);
-  const aiDetectCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const cloudThumbCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const mediaStreamRef = useRef<MediaStream | null>(null);
   const isStartingCameraRef = useRef<boolean>(false);
@@ -115,10 +112,12 @@ export const TejprakashWorkspace: React.FC<TejprakashWorkspaceProps> = ({
   const peerRef = useRef<Peer | null>(null);
   const peerConnRef = useRef<DataConnection | null>(null);
   const openPeerConnsRef = useRef<Map<string, DataConnection>>(new Map());
+  const pendingPeerConnsRef = useRef<Set<string>>(new Set());
   const myPeerIdRef = useRef<string>('');
   const latestCountRef = useRef<number>(0);
   const latestBoxesRef = useRef<DetectedPersonBox[]>([]);
   const lastCloudRelayMsRef = useRef<number>(0);
+  const lastWebRtcRxMsRef = useRef<number>(0);
 
   const serialPortRef = useRef<WebSerialPort | null>(null);
   const lastSentCmdRef = useRef<string>('');
@@ -128,11 +127,47 @@ export const TejprakashWorkspace: React.FC<TejprakashWorkspaceProps> = ({
     setRole(initialRole);
   }, [initialRole]);
 
-  const hasActiveVisionInput = localCameraActive || Boolean(remoteFrameUrl);
+  // Direct Canvas Overlay Drawer (Zero React re-renders per frame!)
+  const drawOverlayBoxesDirect = useCallback(
+    (boxes: DetectedPersonBox[], srcW: number, srcH: number) => {
+      const canvas = overlayCanvasRef.current;
+      if (!canvas) return;
+      const ctx = canvas.getContext('2d');
+      if (!ctx) return;
 
-  // Load COCO-SSD AI person detection model on demand when a camera feed is active
+      const w = srcW > 0 ? srcW : 320;
+      const h = srcH > 0 ? srcH : 240;
+      if (canvas.width !== w) canvas.width = w;
+      if (canvas.height !== h) canvas.height = h;
+      ctx.clearRect(0, 0, w, h);
+
+      for (let i = 0; i < boxes.length; i++) {
+        const item = boxes[i];
+        const [x, y, bw, bh] = item.bbox;
+        ctx.strokeStyle = '#36d67e';
+        ctx.lineWidth = 2.5;
+        ctx.strokeRect(x, y, bw, bh);
+
+        const label = `PERSON · ${Math.round(item.score * 100)}%`;
+        ctx.font = '600 11px Inter, sans-serif';
+        const textW = ctx.measureText(label).width + 12;
+        const boxY = Math.max(0, y - 22);
+        ctx.fillStyle = 'rgba(20, 20, 26, 0.88)';
+        ctx.fillRect(x, boxY, textW, 20);
+        ctx.strokeStyle = '#36d67e';
+        ctx.lineWidth = 1.2;
+        ctx.strokeRect(x, boxY, textW, 20);
+        ctx.fillStyle = '#36d67e';
+        ctx.fillText(label, x + 6, Math.max(14, y - 8));
+      }
+    },
+    []
+  );
+
+  // Only load COCO-SSD on the device that actually has its local hardware camera turned ON!
+  // This prevents the Controller laptop from downloading/running TensorFlow when viewing remote frames.
   useEffect(() => {
-    if (!visible || !hasActiveVisionInput) return;
+    if (!visible || !localCameraActive) return;
     let cancelled = false;
     setAiModelLoading(true);
     getCocoSsdModel()
@@ -148,7 +183,7 @@ export const TejprakashWorkspace: React.FC<TejprakashWorkspaceProps> = ({
     return () => {
       cancelled = true;
     };
-  }, [visible, hasActiveVisionInput]);
+  }, [visible, localCameraActive]);
 
   // Write command to Arduino UNO over Web Serial
   const sendCommandToArduino = useCallback(async (f1: number, f2: number, force = false) => {
@@ -344,10 +379,7 @@ export const TejprakashWorkspace: React.FC<TejprakashWorkspaceProps> = ({
     }
   }, [visible, localCameraActive, stopLocalCamera]);
 
-  // Real-time Multi-Transport Link:
-  // 1. PeerJS WebRTC (with Google STUN + OpenRelay TURN + Multi-Slot Controller IDs + Bidirectional Discovery)
-  // 2. Cloud WebSocket Relay (wss://ntfy.sh) so Smartphone (4G/5G) -> Laptop (Wi-Fi) works on static Vercel even behind strict NAT
-  // 3. Express /ws & /api/room HTTP fallback + BroadcastChannel
+  // Real-time Multi-Transport Link (Zero-React-Re-render Direct DOM Frame Pipeline):
   useEffect(() => {
     if (!visible) return;
 
@@ -355,44 +387,89 @@ export const TejprakashWorkspace: React.FC<TejprakashWorkspaceProps> = ({
     const roomClean = roomId.toLowerCase().replace(/[^a-z0-9]/g, '');
     const ntfyTopic = `tejprakash_live_v3_${roomClean}`;
 
-    const handleIncomingFramePacket = (data: {
-      type?: string;
-      frameDataUrl?: string;
-      personCount?: number;
-      boxes?: DetectedPersonBox[];
-      camPeerId?: string;
-      fan1Speed?: number;
-      fan2Speed?: number;
-      newPassword?: string;
-    }) => {
+    const handleIncomingFramePacket = (
+      data: {
+        type?: string;
+        frameDataUrl?: string;
+        frameW?: number;
+        frameH?: number;
+        personCount?: number;
+        boxes?: DetectedPersonBox[];
+        camPeerId?: string;
+        fan1Speed?: number;
+        fan2Speed?: number;
+        newPassword?: string;
+      },
+      source: 'webrtc' | 'ws' | 'ntfy' = 'webrtc'
+    ) => {
       if (!data || unmounted) return;
 
       if (data.type === 'camera:frame' && role === 'controller') {
-        if (data.frameDataUrl) {
-          setRemoteFrameUrl(data.frameDataUrl);
-          setRemoteCameraOnline(true);
+        if (source === 'webrtc' || source === 'ws') {
+          lastWebRtcRxMsRef.current = performance.now();
+        } else if (source === 'ntfy') {
+          // If fast WebRTC or local WS delivered a frame in the last 3.2s, ignore delayed ntfy.sh frames
+          // so old cloud packets NEVER cause stutter or overwrite live frames!
+          if (performance.now() - lastWebRtcRxMsRef.current < 3200) {
+            // Still connect back to camPeerId if needed
+            if (
+              data.camPeerId &&
+              peerRef.current &&
+              !peerRef.current.disconnected &&
+              !peerRef.current.destroyed &&
+              !openPeerConnsRef.current.has(data.camPeerId) &&
+              !pendingPeerConnsRef.current.has(data.camPeerId)
+            ) {
+              try {
+                pendingPeerConnsRef.current.add(data.camPeerId);
+                const backConn = peerRef.current.connect(data.camPeerId, { reliable: true });
+                setupDataConn(backConn);
+              } catch {
+                pendingPeerConnsRef.current.delete(data.camPeerId);
+              }
+            }
+            return;
+          }
         }
+
+        // 1. Update <img> src directly via DOM ref (0 React re-renders!)
+        if (data.frameDataUrl && remoteImgRef.current) {
+          remoteImgRef.current.src = data.frameDataUrl;
+          setRemoteCameraOnline((prev) => (prev ? prev : true));
+        }
+
+        // 2. Only update React state if the integer person count changed
         if (typeof data.personCount === 'number' && data.personCount >= 0) {
-          latestCountRef.current = data.personCount;
-          setRawDetectedCount(data.personCount);
+          const nextCount = data.personCount;
+          latestCountRef.current = nextCount;
+          setRawDetectedCount((prev) => (prev === nextCount ? prev : nextCount));
         }
-        if (Array.isArray(data.boxes)) {
+
+        // 3. Draw bounding boxes directly onto overlayCanvasRef (0 React re-renders!)
+        if (Array.isArray(data.boxes) && !localCameraActive) {
           latestBoxesRef.current = data.boxes;
-          setDetectedBoxes(data.boxes);
+          drawOverlayBoxesDirect(
+            data.boxes,
+            data.frameW || ( source === 'ntfy' ? 160 : 288 ),
+            data.frameH || ( source === 'ntfy' ? 120 : 216 )
+          );
         }
-        // If Camera shared its PeerJS ID and we aren't connected to it yet, connect back from Controller!
+
+        // 4. Bidirectional PeerJS auto-discovery
         if (
           data.camPeerId &&
           peerRef.current &&
           !peerRef.current.disconnected &&
           !peerRef.current.destroyed &&
-          !openPeerConnsRef.current.has(data.camPeerId)
+          !openPeerConnsRef.current.has(data.camPeerId) &&
+          !pendingPeerConnsRef.current.has(data.camPeerId)
         ) {
           try {
+            pendingPeerConnsRef.current.add(data.camPeerId);
             const backConn = peerRef.current.connect(data.camPeerId, { reliable: true });
             setupDataConn(backConn);
           } catch {
-            // Ignore
+            pendingPeerConnsRef.current.delete(data.camPeerId);
           }
         }
       } else if (data.type === 'controller:update' && role === 'camera') {
@@ -408,24 +485,27 @@ export const TejprakashWorkspace: React.FC<TejprakashWorkspaceProps> = ({
       if (!conn) return;
       conn.on('open', () => {
         if (unmounted) return;
+        pendingPeerConnsRef.current.delete(conn.peer);
         openPeerConnsRef.current.set(conn.peer, conn);
         peerConnRef.current = conn;
       });
       conn.on('data', (raw: unknown) => {
         if (typeof raw === 'string') {
           try {
-            handleIncomingFramePacket(JSON.parse(raw));
+            handleIncomingFramePacket(JSON.parse(raw), 'webrtc');
           } catch {
             // Ignore
           }
         } else if (raw && typeof raw === 'object') {
-          handleIncomingFramePacket(raw as Record<string, unknown>);
+          handleIncomingFramePacket(raw as Record<string, unknown>, 'webrtc');
         }
       });
       conn.on('close', () => {
+        pendingPeerConnsRef.current.delete(conn.peer);
         openPeerConnsRef.current.delete(conn.peer);
       });
       conn.on('error', () => {
+        pendingPeerConnsRef.current.delete(conn.peer);
         openPeerConnsRef.current.delete(conn.peer);
       });
     };
@@ -435,7 +515,7 @@ export const TejprakashWorkspace: React.FC<TejprakashWorkspaceProps> = ({
     if (typeof BroadcastChannel !== 'undefined') {
       bc = new BroadcastChannel(`tejprakash_${roomId}`);
       bcRef.current = bc;
-      bc.onmessage = (ev) => handleIncomingFramePacket(ev.data);
+      bc.onmessage = (ev) => handleIncomingFramePacket(ev.data, 'ws');
     }
 
     // 2. Local /ws WebSocket (when running with server.ts)
@@ -458,18 +538,18 @@ export const TejprakashWorkspace: React.FC<TejprakashWorkspaceProps> = ({
           try {
             const msg = JSON.parse(event.data);
             if (msg.type === 'room:init' && msg.state && role === 'controller') {
-              if (msg.state.latestFrameDataUrl) {
-                setRemoteFrameUrl(msg.state.latestFrameDataUrl);
+              if (msg.state.latestFrameDataUrl && remoteImgRef.current) {
+                remoteImgRef.current.src = msg.state.latestFrameDataUrl;
                 setRemoteCameraOnline(Boolean(msg.state.cameraActive));
                 setRawDetectedCount(msg.state.personCount || 0);
-                setDetectedBoxes(msg.state.boxes || []);
+                drawOverlayBoxesDirect(msg.state.boxes || [], 288, 216);
               }
             } else if (msg.type === 'camera:stopped' && role === 'controller') {
               setRemoteCameraOnline(false);
             } else if (msg.type === 'presence:update' && role === 'controller') {
               setRemoteCameraOnline(Boolean(msg.cameraActive));
             } else {
-              handleIncomingFramePacket(msg);
+              handleIncomingFramePacket(msg, 'ws');
             }
           } catch {
             // Ignore
@@ -478,15 +558,15 @@ export const TejprakashWorkspace: React.FC<TejprakashWorkspaceProps> = ({
 
         ws.onclose = () => {
           if (!unmounted) {
-            reconnectTimer = window.setTimeout(connectWs, 3500);
+            reconnectTimer = window.setTimeout(connectWs, 4000);
           }
         };
       } catch {
-        // Fallback to Cloud WSS & PeerJS
+        // Fallback to PeerJS & Cloud Relay
       }
     };
 
-    // 3. Cloud WebSocket Relay (wss://ntfy.sh) for cross-network Vercel deployments
+    // 3. Cloud WebSocket Relay (wss://ntfy.sh) for initial signaling & strict-firewall fallback
     let ntfyWs: WebSocket | null = null;
     let ntfyReconnectTimer: number | null = null;
     const connectNtfyCloudRelay = () => {
@@ -499,15 +579,15 @@ export const TejprakashWorkspace: React.FC<TejprakashWorkspaceProps> = ({
             const wrapper = JSON.parse(ev.data);
             if (wrapper && wrapper.event === 'message' && typeof wrapper.message === 'string') {
               const inner = JSON.parse(wrapper.message);
-              handleIncomingFramePacket(inner);
+              handleIncomingFramePacket(inner, 'ntfy');
             }
           } catch {
-            // Ignore non-JSON keepalives
+            // Ignore keepalives
           }
         };
         ntfyWs.onclose = () => {
           if (!unmounted) {
-            ntfyReconnectTimer = window.setTimeout(connectNtfyCloudRelay, 3000);
+            ntfyReconnectTimer = window.setTimeout(connectNtfyCloudRelay, 4000);
           }
         };
       } catch {
@@ -566,12 +646,17 @@ export const TejprakashWorkspace: React.FC<TejprakashWorkspaceProps> = ({
             return;
           for (const targetCtrlId of ctrlSlots) {
             const existing = openPeerConnsRef.current.get(targetCtrlId);
-            if (!existing || !existing.open) {
+            if ((!existing || !existing.open) && !pendingPeerConnsRef.current.has(targetCtrlId)) {
               try {
+                pendingPeerConnsRef.current.add(targetCtrlId);
                 const conn = peer.connect(targetCtrlId, { reliable: true });
                 setupDataConn(conn);
+                // Clear pending lock after 3s if handshake didn't complete
+                window.setTimeout(() => {
+                  pendingPeerConnsRef.current.delete(targetCtrlId);
+                }, 3000);
               } catch {
-                // Ignore
+                pendingPeerConnsRef.current.delete(targetCtrlId);
               }
             }
           }
@@ -598,7 +683,7 @@ export const TejprakashWorkspace: React.FC<TejprakashWorkspaceProps> = ({
               ctrlSlotIndex < ctrlSlots.length
                 ? ctrlSlots[ctrlSlotIndex]
                 : `tejprakash-ctrl-${roomClean}-${Math.floor(100 + Math.random() * 899)}`;
-            window.setTimeout(() => startPeerInstance(fallbackId), 350);
+            window.setTimeout(() => startPeerInstance(fallbackId), 300);
           }
         });
       } catch {
@@ -611,7 +696,7 @@ export const TejprakashWorkspace: React.FC<TejprakashWorkspaceProps> = ({
       connectWs();
       connectNtfyCloudRelay();
       startPeerInstance();
-    }, 350);
+    }, 250);
 
     return () => {
       unmounted = true;
@@ -620,44 +705,15 @@ export const TejprakashWorkspace: React.FC<TejprakashWorkspaceProps> = ({
       if (ntfyReconnectTimer !== null) window.clearTimeout(ntfyReconnectTimer);
       if (peerRetryTimer !== null) window.clearInterval(peerRetryTimer);
       openPeerConnsRef.current.clear();
+      pendingPeerConnsRef.current.clear();
       ws?.close();
       ntfyWs?.close();
       bc?.close();
       peer?.destroy();
     };
-  }, [visible, role, roomId, onFanSpeedChange]);
+  }, [visible, role, roomId, onFanSpeedChange, localCameraActive, drawOverlayBoxesDirect]);
 
-  // Immediately initiate PeerJS data connection as soon as local camera turns on
-  useEffect(() => {
-    if (
-      role === 'camera' &&
-      localCameraActive &&
-      peerRef.current &&
-      !peerRef.current.disconnected
-    ) {
-      const roomClean = roomId.toLowerCase().replace(/[^a-z0-9]/g, '');
-      const ctrlSlots = [
-        `tejprakash-ctrl-${roomClean}`,
-        `tejprakash-ctrl-${roomClean}-1`,
-        `tejprakash-ctrl-${roomClean}-2`,
-      ];
-      for (const targetCtrlId of ctrlSlots) {
-        try {
-          if (!openPeerConnsRef.current.has(targetCtrlId)) {
-            const conn = peerRef.current.connect(targetCtrlId, { reliable: true });
-            conn.on('open', () => {
-              openPeerConnsRef.current.set(conn.peer, conn);
-              peerConnRef.current = conn;
-            });
-          }
-        } catch {
-          // Ignore
-        }
-      }
-    }
-  }, [role, localCameraActive, roomId]);
-
-  // LOOP 1: Non-Blocking Fast Camera Frame Broadcaster (Starts immediately when Camera is ON, does NOT wait for COCO-SSD!)
+  // LOOP 1: High-Speed Non-Blocking Camera Frame Broadcaster (~10 FPS with WebRTC Backpressure Guard)
   useEffect(() => {
     if (!visible || role !== 'camera' || !localCameraActive) return;
     let active = true;
@@ -674,10 +730,10 @@ export const TejprakashWorkspace: React.FC<TejprakashWorkspaceProps> = ({
           canvas = document.createElement('canvas');
           captureCanvasRef.current = canvas;
         }
-        const targetW = 320;
-        const targetH = Math.round((videoEl.videoHeight / videoEl.videoWidth) * targetW) || 240;
-        canvas.width = targetW;
-        canvas.height = targetH;
+        const targetW = 288;
+        const targetH = Math.round((videoEl.videoHeight / videoEl.videoWidth) * targetW) || 216;
+        if (canvas.width !== targetW) canvas.width = targetW;
+        if (canvas.height !== targetH) canvas.height = targetH;
         const ctx = canvas.getContext('2d');
         if (ctx) {
           ctx.drawImage(videoEl, 0, 0, targetW, targetH);
@@ -693,38 +749,55 @@ export const TejprakashWorkspace: React.FC<TejprakashWorkspaceProps> = ({
             score: Math.round(b.score * 100) / 100,
           }));
 
-          const frameDataUrl = canvas.toDataURL('image/jpeg', 0.48);
+          const frameDataUrl = canvas.toDataURL('image/jpeg', 0.42);
           const packet = {
             type: 'camera:frame',
             roomId,
             camPeerId: myPeerIdRef.current || undefined,
             frameDataUrl,
+            frameW: targetW,
+            frameH: targetH,
             personCount: latestCountRef.current,
             boxes: scaledBoxes,
           };
 
-          // 1. Send over Local WebSocket (/ws)
-          if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+          // 1. Local WebSocket (/ws) with buffer guard
+          if (
+            wsRef.current &&
+            wsRef.current.readyState === WebSocket.OPEN &&
+            wsRef.current.bufferedAmount < 65536
+          ) {
             wsRef.current.send(JSON.stringify(packet));
           }
-          // 2. Send over BroadcastChannel (same browser)
+
+          // 2. BroadcastChannel (same browser)
           if (bcRef.current) {
             bcRef.current.postMessage(packet);
           }
-          // 3. Send over all open PeerJS WebRTC DataConnections
+
+          // 3. PeerJS WebRTC DataConnections with SCTP bufferedAmount backpressure check
+          let sentOverWebRtc = false;
           openPeerConnsRef.current.forEach((conn) => {
             if (conn && conn.open) {
-              try {
-                conn.send(packet);
-              } catch {
-                // Ignore
+              const dc = (conn as unknown as { dataChannel?: RTCDataChannel }).dataChannel;
+              if (!dc || dc.bufferedAmount < 65536) {
+                try {
+                  conn.send(packet);
+                  sentOverWebRtc = true;
+                } catch {
+                  // Ignore
+                }
+              } else {
+                // Channel is open, just skipping 1 frame to let buffer drain without lag
+                sentOverWebRtc = true;
               }
             }
           });
 
-          // 4. Every 850ms, also push a compact (<3.6KB) cloud frame to ntfy.sh so cross-network Vercel works even before/without WebRTC P2P
+          // 4. Only use Cloud Relay (ntfy.sh) if NO direct WebRTC connection is open yet,
+          // and throttle to 2200ms so it never hits HTTP 429 rate limits!
           const nowMs = performance.now();
-          if (nowMs - lastCloudRelayMsRef.current >= 850) {
+          if (!sentOverWebRtc && nowMs - lastCloudRelayMsRef.current >= 2200) {
             lastCloudRelayMsRef.current = nowMs;
             let thumbCanvas = cloudThumbCanvasRef.current;
             if (!thumbCanvas) {
@@ -733,8 +806,8 @@ export const TejprakashWorkspace: React.FC<TejprakashWorkspaceProps> = ({
             }
             const tw = 160;
             const th = Math.round((videoEl.videoHeight / videoEl.videoWidth) * tw) || 120;
-            thumbCanvas.width = tw;
-            thumbCanvas.height = th;
+            if (thumbCanvas.width !== tw) thumbCanvas.width = tw;
+            if (thumbCanvas.height !== th) thumbCanvas.height = th;
             const tctx = thumbCanvas.getContext('2d');
             if (tctx) {
               tctx.drawImage(videoEl, 0, 0, tw, th);
@@ -754,6 +827,8 @@ export const TejprakashWorkspace: React.FC<TejprakashWorkspaceProps> = ({
                 type: 'camera:frame',
                 camPeerId: myPeerIdRef.current || undefined,
                 frameDataUrl: compactUrl,
+                frameW: tw,
+                frameH: th,
                 personCount: latestCountRef.current,
                 boxes: compactBoxes,
               });
@@ -769,117 +844,49 @@ export const TejprakashWorkspace: React.FC<TejprakashWorkspaceProps> = ({
       }
 
       if (active) {
-        frameTimer = window.setTimeout(broadcastFrameTick, 210);
+        frameTimer = window.setTimeout(broadcastFrameTick, 105);
       }
     };
 
-    frameTimer = window.setTimeout(broadcastFrameTick, 120);
+    frameTimer = window.setTimeout(broadcastFrameTick, 90);
     return () => {
       active = false;
       if (frameTimer !== null) window.clearTimeout(frameTimer);
     };
   }, [visible, role, localCameraActive, roomId]);
 
-  // LOOP 2: Asynchronous AI Person Detection Loop
-  // IMPORTANT: Copies <video> to an offscreen 2D <canvas> before passing to TensorFlow.js so TF WebGL NEVER hijacks or blacks out the hardware <video> element!
+  // LOOP 2: Lightweight Asynchronous AI Person Detection Loop (Runs ONLY when local camera is active, every 850ms)
   useEffect(() => {
-    if (!visible) return;
+    if (!visible || !localCameraActive) return;
     let active = true;
     let timerId: number | null = null;
 
     const detectionLoop = async () => {
       if (!active) return;
 
-      const videoEl = localCameraActive ? localVideoRef.current : null;
-
+      const videoEl = localVideoRef.current;
       if (videoEl && videoEl.readyState >= 2 && videoEl.videoWidth > 0) {
-        let aiCanvas = aiDetectCanvasRef.current;
-        if (!aiCanvas) {
-          aiCanvas = document.createElement('canvas');
-          aiDetectCanvasRef.current = aiCanvas;
-        }
-        const vw = videoEl.videoWidth;
-        const vh = videoEl.videoHeight;
-        aiCanvas.width = vw;
-        aiCanvas.height = vh;
-        const actx = aiCanvas.getContext('2d');
-        if (actx) {
-          actx.drawImage(videoEl, 0, 0, vw, vh);
-          const { count, boxes } = await detectPersonsInElement(aiCanvas, 0.4);
-          if (!active) return;
-          latestCountRef.current = count;
-          latestBoxesRef.current = boxes;
-          setRawDetectedCount(count);
-          setDetectedBoxes(boxes);
-        }
-      } else if (
-        role === 'controller' &&
-        !localCameraActive &&
-        remoteFrameUrl &&
-        remoteImgRef.current &&
-        remoteImgRef.current.complete &&
-        remoteImgRef.current.naturalWidth > 0
-      ) {
-        const { count, boxes } = await detectPersonsInElement(remoteImgRef.current, 0.4);
-        if (active && count >= 0) {
-          latestCountRef.current = count;
-          latestBoxesRef.current = boxes;
-          setRawDetectedCount(count);
-          setDetectedBoxes(boxes);
+        const res = await detectPersonsInElement(videoEl, 0.4);
+        if (!active) return;
+        if (res) {
+          latestCountRef.current = res.count;
+          latestBoxesRef.current = res.boxes;
+          setRawDetectedCount((prev) => (prev === res.count ? prev : res.count));
+          drawOverlayBoxesDirect(res.boxes, videoEl.videoWidth, videoEl.videoHeight);
         }
       }
 
       if (active) {
-        timerId = window.setTimeout(detectionLoop, 420);
+        timerId = window.setTimeout(detectionLoop, 850);
       }
     };
 
-    timerId = window.setTimeout(detectionLoop, 450);
+    timerId = window.setTimeout(detectionLoop, 500);
     return () => {
       active = false;
       if (timerId !== null) window.clearTimeout(timerId);
     };
-  }, [visible, localCameraActive, remoteFrameUrl, role]);
-
-  // Draw AI person detection bounding boxes onto overlayCanvasRef
-  useEffect(() => {
-    const canvas = overlayCanvasRef.current;
-    if (!canvas) return;
-    const ctx = canvas.getContext('2d');
-    if (!ctx) return;
-
-    let srcW = 640;
-    let srcH = 480;
-    if (localCameraActive && localVideoRef.current && localVideoRef.current.videoWidth > 0) {
-      srcW = localVideoRef.current.videoWidth;
-      srcH = localVideoRef.current.videoHeight;
-    } else if (remoteImgRef.current && remoteImgRef.current.naturalWidth > 0) {
-      srcW = remoteImgRef.current.naturalWidth;
-      srcH = remoteImgRef.current.naturalHeight;
-    }
-
-    canvas.width = srcW;
-    canvas.height = srcH;
-    ctx.clearRect(0, 0, srcW, srcH);
-
-    for (const item of detectedBoxes) {
-      const [x, y, w, h] = item.bbox;
-      ctx.strokeStyle = '#36d67e';
-      ctx.lineWidth = 3;
-      ctx.strokeRect(x, y, w, h);
-
-      const label = `PERSON · ${Math.round(item.score * 100)}%`;
-      ctx.font = '600 12px Inter, sans-serif';
-      const textW = ctx.measureText(label).width + 14;
-      ctx.fillStyle = 'rgba(20, 20, 26, 0.88)';
-      ctx.fillRect(x, Math.max(0, y - 26), textW, 24);
-      ctx.strokeStyle = '#36d67e';
-      ctx.lineWidth = 1.5;
-      ctx.strokeRect(x, Math.max(0, y - 26), textW, 24);
-      ctx.fillStyle = '#36d67e';
-      ctx.fillText(label, x + 7, Math.max(16, y - 9));
-    }
-  }, [detectedBoxes, localCameraActive, remoteFrameUrl]);
+  }, [visible, localCameraActive, drawOverlayBoxesDirect]);
 
   // Stabilize person count over 850ms so single-frame flicker never jerks the motors
   useEffect(() => {
@@ -976,11 +983,9 @@ export const TejprakashWorkspace: React.FC<TejprakashWorkspaceProps> = ({
     setPwdChangeSuccess('Controller password updated successfully!');
   };
 
-  const workspaceRootRef = useRef<HTMLDivElement | null>(null);
-
   if (!visible) return null;
 
-  const hasAnyVideoFeed = localCameraActive || Boolean(remoteFrameUrl);
+  const hasAnyVideoFeed = localCameraActive || remoteCameraOnline;
 
   const renderAnimatedTurbine = (speed: number, accentHex: string) => {
     const isSpinning = speed > 0;
@@ -1027,17 +1032,11 @@ export const TejprakashWorkspace: React.FC<TejprakashWorkspaceProps> = ({
 
   return (
     <div
-      ref={workspaceRootRef}
       data-testid="tejprakash-workspace"
-      onPointerMove={(e) => {
-        if (workspaceRootRef.current) {
-          workspaceRootRef.current.style.backgroundImage = `radial-gradient(560px circle at ${e.clientX}px ${e.clientY}px, rgba(185, 174, 232, 0.11), rgba(54, 214, 126, 0.05) 42%, transparent 75%), radial-gradient(circle at 50% 50%, rgba(5, 5, 7, 0.52) 0%, rgba(5, 5, 7, 0.14) 68%, transparent 100%)`;
-        }
-      }}
       className="fixed inset-0 z-30 bg-transparent text-[#ededf0] overflow-y-auto select-text font-sans"
       style={{
         backgroundImage:
-          'radial-gradient(560px circle at 50% 50%, rgba(185, 174, 232, 0.10), rgba(54, 214, 126, 0.05) 42%, transparent 75%), radial-gradient(circle at 50% 50%, rgba(5, 5, 7, 0.52) 0%, rgba(5, 5, 7, 0.14) 68%, transparent 100%)',
+          'radial-gradient(circle at 50% 50%, rgba(5, 5, 7, 0.52) 0%, rgba(5, 5, 7, 0.14) 68%, transparent 100%)',
       }}
     >
       <div className="max-w-[1220px] mx-auto px-6 sm:px-14 py-6 sm:py-8 space-y-4 sm:space-y-5">
@@ -1392,14 +1391,15 @@ export const TejprakashWorkspace: React.FC<TejprakashWorkspaceProps> = ({
                       }`}
                     />
 
-                    {!localCameraActive && remoteFrameUrl && (
-                      <img
-                        ref={remoteImgRef}
-                        src={remoteFrameUrl}
-                        alt="Live Smartphone Classroom Feed"
-                        className="absolute inset-0 z-10 w-full h-full object-cover block"
-                      />
-                    )}
+                    <img
+                      ref={remoteImgRef}
+                      alt="Live Smartphone Classroom Feed"
+                      className={`absolute inset-0 z-10 w-full h-full object-cover transition-opacity duration-150 ${
+                        !localCameraActive && remoteCameraOnline
+                          ? 'opacity-100'
+                          : 'opacity-0 pointer-events-none'
+                      }`}
+                    />
 
                     <canvas
                       ref={overlayCanvasRef}
@@ -1442,7 +1442,7 @@ export const TejprakashWorkspace: React.FC<TejprakashWorkspaceProps> = ({
                       <span className="text-[11px] font-medium text-white/85">
                         {localCameraActive
                           ? 'Local Camera Vision'
-                          : remoteCameraOnline || remoteFrameUrl
+                          : remoteCameraOnline
                           ? 'Smartphone Camera Stream'
                           : 'Vision Standby'}
                       </span>

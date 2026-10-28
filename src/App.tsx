@@ -664,10 +664,9 @@ export default function App() {
         y: (e.clientY - panelTopPx) / layout.panelHeight,
       };
 
-      pointerNdc.set((e.clientX / W) * 2 - 1, -(e.clientY / H) * 2 + 1);
-      raycaster.setFromCamera(pointerNdc, camera);
-
-      if (phaseRef.current === 'hero' || phaseRef.current === 'entering' || phaseRef.current === 'paper') {
+      if (phaseRef.current === 'hero' || phaseRef.current === 'entering') {
+        pointerNdc.set((e.clientX / W) * 2 - 1, -(e.clientY / H) * 2 + 1);
+        raycaster.setFromCamera(pointerNdc, camera);
         const hits = raycaster.intersectObjects(interactableMeshes, false);
         hoveredPieceId = hits.length > 0 ? (hits[0].object.userData.pieceId as PieceId) : null;
       } else {
@@ -678,6 +677,8 @@ export default function App() {
         (phaseRef.current === 'paper' || phaseRef.current === 'shattering') &&
         portalModeRef.current === 'rules'
       ) {
+        pointerNdc.set((e.clientX / W) * 2 - 1, -(e.clientY / H) * 2 + 1);
+        raycaster.setFromCamera(pointerNdc, camera);
         const backHits = raycaster.intersectObject(backSliverMesh, false);
         const nowBackHov = backHits.length > 0 || hoverStateRef.current.backHovered;
         if (nowBackHov !== isBackSliverHovered3D) {
@@ -819,14 +820,12 @@ export default function App() {
         );
       }
 
-      const ambientOrbitX = phase === 'paper' ? Math.sin(nowSec * 0.75) * 0.55 : 0;
-      const ambientOrbitY = phase === 'paper' ? Math.cos(nowSec * 0.6) * 0.45 : 0;
+      const ambientOrbitX = phase === 'paper' ? Math.sin(nowSec * 0.75) * 0.42 : 0;
+      const ambientOrbitY = phase === 'paper' ? Math.cos(nowSec * 0.6) * 0.35 : 0;
       const tiltXInput =
-        (pointerInside && (phase === 'hero' || phase === 'paper') ? pointerNormX * 2 : 0) +
-        ambientOrbitX;
+        (pointerInside && phase === 'hero' ? pointerNormX * 2 : 0) + ambientOrbitX;
       const tiltYInput =
-        (pointerInside && (phase === 'hero' || phase === 'paper') ? pointerNormY * 2 : 0) +
-        ambientOrbitY;
+        (pointerInside && phase === 'hero' ? pointerNormY * 2 : 0) + ambientOrbitY;
       const targetBlockRotY = (tiltXInput * 7.0 - 1.2) * DEG2RAD;
       const targetBlockRotX = (-tiltYInput * 5.5 + 0.8) * DEG2RAD;
       const tiltAlpha = 1 - Math.exp(-dt / 0.3);
@@ -847,7 +846,7 @@ export default function App() {
       for (let pieceIdx = 0; pieceIdx < pieceIds.length; pieceIdx++) {
         const id = pieceIds[pieceIdx];
         const piece = pieces[id];
-        const isHovered = (phase === 'hero' || phase === 'paper') && hoveredPieceId === id;
+        const isHovered = phase === 'hero' && hoveredPieceId === id;
 
         const targetLift = isHovered ? (id === 'nav' ? 32 * layout.S : 50 * layout.S) : 0;
         let targetTipX = 0;
