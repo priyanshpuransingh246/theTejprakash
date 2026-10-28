@@ -298,3 +298,18 @@ body,
   animation: tejFloatCard 4.6s ease-in-out infinite;
 }
 
+@keyframes tejBorderBreathe {
+  0%, 100% {
+    transform: scale3d(1, 1, 1) translate3d(0px, 0px, 0px);
+  }
+  50% {
+    transform: scale3d(1.018, 1.018, 1) translate3d(0px, -6px, 0px);
+  }
+}
+
+.tej-border-breathe {
+  animation: tejBorderBreathe 6.5s ease-in-out infinite;
+  will-change: transform;
+}
+
+

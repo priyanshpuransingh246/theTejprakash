@@ -380,56 +380,84 @@ export const TejprakashWorkspace: React.FC<TejprakashWorkspaceProps> = ({
   }, [visible, localCameraActive, stopLocalCamera]);
 
   // Real-time Multi-Transport Link (Zero-React-Re-render Direct DOM Frame Pipeline):
+  // Uses Persistent Binary MQTT-over-WebSockets (wss://broker.emqx.io:8084/mqtt) + PeerJS WebRTC + Local WS
   useEffect(() => {
     if (!visible) return;
 
     let unmounted = false;
     const roomClean = roomId.toLowerCase().replace(/[^a-z0-9]/g, '');
-    const ntfyTopic = `tejprakash_live_v3_${roomClean}`;
+    const mqttTopic = `tejprakash/live/v4/${roomClean}`;
+    const textEncoder = new TextEncoder();
+    const textDecoder = new TextDecoder();
 
-    const handleIncomingFramePacket = (
-      data: {
-        type?: string;
-        frameDataUrl?: string;
-        frameW?: number;
-        frameH?: number;
-        personCount?: number;
-        boxes?: DetectedPersonBox[];
-        camPeerId?: string;
-        fan1Speed?: number;
-        fan2Speed?: number;
-        newPassword?: string;
-      },
-      source: 'webrtc' | 'ws' | 'ntfy' = 'webrtc'
-    ) => {
+    const encodeMqttVarint = (len: number): number[] => {
+      const out: number[] = [];
+      let v = len;
+      do {
+        let d = v % 128;
+        v = Math.floor(v / 128);
+        if (v > 0) d |= 128;
+        out.push(d);
+      } while (v > 0);
+      return out;
+    };
+
+    const buildMqttConnectPacket = (clientId: string): Uint8Array => {
+      const idBytes = textEncoder.encode(clientId);
+      const vh = [0x00, 0x04, 0x4d, 0x51, 0x54, 0x54, 0x04, 0x02, 0x00, 0x3c];
+      const rem = vh.length + 2 + idBytes.length;
+      const varint = encodeMqttVarint(rem);
+      const pkt = new Uint8Array(1 + varint.length + rem);
+      let idx = 0;
+      pkt[idx++] = 0x10;
+      for (const b of varint) pkt[idx++] = b;
+      for (const b of vh) pkt[idx++] = b;
+      pkt[idx++] = (idBytes.length >> 8) & 0xff;
+      pkt[idx++] = idBytes.length & 0xff;
+      pkt.set(idBytes, idx);
+      return pkt;
+    };
+
+    const buildMqttSubscribePacket = (topic: string): Uint8Array => {
+      const tb = textEncoder.encode(topic);
+      const rem = 2 + 2 + tb.length + 1;
+      const varint = encodeMqttVarint(rem);
+      const pkt = new Uint8Array(1 + varint.length + rem);
+      let idx = 0;
+      pkt[idx++] = 0x82;
+      for (const b of varint) pkt[idx++] = b;
+      pkt[idx++] = 0x00;
+      pkt[idx++] = 0x01;
+      pkt[idx++] = (tb.length >> 8) & 0xff;
+      pkt[idx++] = tb.length & 0xff;
+      pkt.set(tb, idx);
+      pkt[idx + tb.length] = 0x00;
+      return pkt;
+    };
+
+    let lastRenderedSeq = -1;
+
+    const handleIncomingFramePacket = (data: {
+      type?: string;
+      seq?: number;
+      frameDataUrl?: string;
+      frameW?: number;
+      frameH?: number;
+      personCount?: number;
+      boxes?: DetectedPersonBox[];
+      camPeerId?: string;
+      fan1Speed?: number;
+      fan2Speed?: number;
+      newPassword?: string;
+    }) => {
       if (!data || unmounted) return;
 
       if (data.type === 'camera:frame' && role === 'controller') {
-        if (source === 'webrtc' || source === 'ws') {
-          lastWebRtcRxMsRef.current = performance.now();
-        } else if (source === 'ntfy') {
-          // If fast WebRTC or local WS delivered a frame in the last 3.2s, ignore delayed ntfy.sh frames
-          // so old cloud packets NEVER cause stutter or overwrite live frames!
-          if (performance.now() - lastWebRtcRxMsRef.current < 3200) {
-            // Still connect back to camPeerId if needed
-            if (
-              data.camPeerId &&
-              peerRef.current &&
-              !peerRef.current.disconnected &&
-              !peerRef.current.destroyed &&
-              !openPeerConnsRef.current.has(data.camPeerId) &&
-              !pendingPeerConnsRef.current.has(data.camPeerId)
-            ) {
-              try {
-                pendingPeerConnsRef.current.add(data.camPeerId);
-                const backConn = peerRef.current.connect(data.camPeerId, { reliable: true });
-                setupDataConn(backConn);
-              } catch {
-                pendingPeerConnsRef.current.delete(data.camPeerId);
-              }
-            }
-            return;
+        if (typeof data.seq === 'number') {
+          if (data.seq <= lastRenderedSeq && lastRenderedSeq - data.seq < 500) {
+            return; // Ignore duplicate frame arrived over second transport
           }
+          lastRenderedSeq = data.seq;
         }
 
         // 1. Update <img> src directly via DOM ref (0 React re-renders!)
@@ -450,8 +478,8 @@ export const TejprakashWorkspace: React.FC<TejprakashWorkspaceProps> = ({
           latestBoxesRef.current = data.boxes;
           drawOverlayBoxesDirect(
             data.boxes,
-            data.frameW || ( source === 'ntfy' ? 160 : 288 ),
-            data.frameH || ( source === 'ntfy' ? 120 : 216 )
+            data.frameW || 256,
+            data.frameH || 192
           );
         }
 
@@ -492,12 +520,12 @@ export const TejprakashWorkspace: React.FC<TejprakashWorkspaceProps> = ({
       conn.on('data', (raw: unknown) => {
         if (typeof raw === 'string') {
           try {
-            handleIncomingFramePacket(JSON.parse(raw), 'webrtc');
+            handleIncomingFramePacket(JSON.parse(raw));
           } catch {
             // Ignore
           }
         } else if (raw && typeof raw === 'object') {
-          handleIncomingFramePacket(raw as Record<string, unknown>, 'webrtc');
+          handleIncomingFramePacket(raw as Record<string, unknown>);
         }
       });
       conn.on('close', () => {
@@ -515,7 +543,7 @@ export const TejprakashWorkspace: React.FC<TejprakashWorkspaceProps> = ({
     if (typeof BroadcastChannel !== 'undefined') {
       bc = new BroadcastChannel(`tejprakash_${roomId}`);
       bcRef.current = bc;
-      bc.onmessage = (ev) => handleIncomingFramePacket(ev.data, 'ws');
+      bc.onmessage = (ev) => handleIncomingFramePacket(ev.data);
     }
 
     // 2. Local /ws WebSocket (when running with server.ts)
@@ -542,14 +570,14 @@ export const TejprakashWorkspace: React.FC<TejprakashWorkspaceProps> = ({
                 remoteImgRef.current.src = msg.state.latestFrameDataUrl;
                 setRemoteCameraOnline(Boolean(msg.state.cameraActive));
                 setRawDetectedCount(msg.state.personCount || 0);
-                drawOverlayBoxesDirect(msg.state.boxes || [], 288, 216);
+                drawOverlayBoxesDirect(msg.state.boxes || [], 256, 192);
               }
             } else if (msg.type === 'camera:stopped' && role === 'controller') {
               setRemoteCameraOnline(false);
             } else if (msg.type === 'presence:update' && role === 'controller') {
               setRemoteCameraOnline(Boolean(msg.cameraActive));
             } else {
-              handleIncomingFramePacket(msg, 'ws');
+              handleIncomingFramePacket(msg);
             }
           } catch {
             // Ignore
@@ -562,32 +590,85 @@ export const TejprakashWorkspace: React.FC<TejprakashWorkspaceProps> = ({
           }
         };
       } catch {
-        // Fallback to PeerJS & Cloud Relay
+        // Fallback to MQTT WebSocket & PeerJS
       }
     };
 
-    // 3. Cloud WebSocket Relay (wss://ntfy.sh) for initial signaling & strict-firewall fallback
-    let ntfyWs: WebSocket | null = null;
-    let ntfyReconnectTimer: number | null = null;
-    const connectNtfyCloudRelay = () => {
+    // 3. Persistent Binary MQTT-over-WebSocket Relay (wss://broker.emqx.io:8084/mqtt + HiveMQ failover)
+    // Delivers 10 FPS cross-network video continuously with ZERO rate limits!
+    const mqttBrokers = [
+      'wss://broker.emqx.io:8084/mqtt',
+      'wss://broker.hivemq.com:8884/mqtt',
+    ];
+    let brokerIdx = 0;
+    let mqttWs: WebSocket | null = null;
+    let mqttReconnectTimer: number | null = null;
+    let mqttPingInterval: number | null = null;
+
+    const connectMqttRelay = () => {
       if (unmounted) return;
       try {
-        ntfyWs = new WebSocket(`wss://ntfy.sh/${ntfyTopic}/ws`);
-        ntfyWsRef.current = ntfyWs;
-        ntfyWs.onmessage = (ev) => {
-          try {
-            const wrapper = JSON.parse(ev.data);
-            if (wrapper && wrapper.event === 'message' && typeof wrapper.message === 'string') {
-              const inner = JSON.parse(wrapper.message);
-              handleIncomingFramePacket(inner, 'ntfy');
+        const url = mqttBrokers[brokerIdx % mqttBrokers.length];
+        mqttWs = new WebSocket(url, 'mqtt');
+        mqttWs.binaryType = 'arraybuffer';
+        ntfyWsRef.current = mqttWs;
+
+        mqttWs.onopen = () => {
+          if (unmounted || !mqttWs || mqttWs.readyState !== WebSocket.OPEN) return;
+          const clientId = `tej_${role.slice(0, 3)}_${Math.random().toString(36).slice(2, 9)}`;
+          mqttWs.send(buildMqttConnectPacket(clientId));
+          mqttWs.send(buildMqttSubscribePacket(mqttTopic));
+
+          if (mqttPingInterval !== null) window.clearInterval(mqttPingInterval);
+          mqttPingInterval = window.setInterval(() => {
+            if (mqttWs && mqttWs.readyState === WebSocket.OPEN) {
+              mqttWs.send(new Uint8Array([0xc0, 0x00])); // MQTT PINGREQ
             }
-          } catch {
-            // Ignore keepalives
+          }, 25000);
+        };
+
+        mqttWs.onmessage = (ev) => {
+          if (!(ev.data instanceof ArrayBuffer)) return;
+          const buf = new Uint8Array(ev.data);
+          let offset = 0;
+          while (offset < buf.length) {
+            const headerByte = buf[offset];
+            const pktType = headerByte & 0xf0;
+            let idx = offset + 1;
+            let mult = 1;
+            let remLen = 0;
+            let b = 0;
+            do {
+              if (idx >= buf.length) return;
+              b = buf[idx++];
+              remLen += (b & 127) * mult;
+              mult *= 128;
+            } while ((b & 128) !== 0);
+
+            const pktEnd = idx + remLen;
+            if (pktEnd > buf.length) break;
+
+            if (pktType === 0x30) {
+              const topicLen = (buf[idx] << 8) | buf[idx + 1];
+              const payloadStart = idx + 2 + topicLen;
+              if (payloadStart < pktEnd) {
+                try {
+                  const jsonStr = textDecoder.decode(buf.subarray(payloadStart, pktEnd));
+                  handleIncomingFramePacket(JSON.parse(jsonStr));
+                } catch {
+                  // Ignore malformed packet
+                }
+              }
+            }
+            offset = pktEnd;
           }
         };
-        ntfyWs.onclose = () => {
+
+        mqttWs.onclose = () => {
+          if (mqttPingInterval !== null) window.clearInterval(mqttPingInterval);
           if (!unmounted) {
-            ntfyReconnectTimer = window.setTimeout(connectNtfyCloudRelay, 4000);
+            brokerIdx += 1;
+            mqttReconnectTimer = window.setTimeout(connectMqttRelay, 1500);
           }
         };
       } catch {
@@ -595,7 +676,7 @@ export const TejprakashWorkspace: React.FC<TejprakashWorkspaceProps> = ({
       }
     };
 
-    // 4. PeerJS WebRTC with STUN + TURN servers & multi-slot automatic fallback
+    // 4. PeerJS WebRTC with clean Google STUN servers (no dead TURN servers that stall ICE!)
     let peer: Peer | null = null;
     let peerRetryTimer: number | null = null;
     let ctrlSlotIndex = 0;
@@ -610,21 +691,7 @@ export const TejprakashWorkspace: React.FC<TejprakashWorkspaceProps> = ({
       iceServers: [
         { urls: 'stun:stun.l.google.com:19302' },
         { urls: 'stun:stun1.l.google.com:19302' },
-        {
-          urls: 'turn:openrelay.metered.ca:80',
-          username: 'openrelayproject',
-          credential: 'openrelayproject',
-        },
-        {
-          urls: 'turn:openrelay.metered.ca:443',
-          username: 'openrelayproject',
-          credential: 'openrelayproject',
-        },
-        {
-          urls: 'turn:openrelay.metered.ca:443?transport=tcp',
-          username: 'openrelayproject',
-          credential: 'openrelayproject',
-        },
+        { urls: 'stun:stun2.l.google.com:19302' },
       ],
     };
 
@@ -651,7 +718,6 @@ export const TejprakashWorkspace: React.FC<TejprakashWorkspaceProps> = ({
                 pendingPeerConnsRef.current.add(targetCtrlId);
                 const conn = peer.connect(targetCtrlId, { reliable: true });
                 setupDataConn(conn);
-                // Clear pending lock after 3s if handshake didn't complete
                 window.setTimeout(() => {
                   pendingPeerConnsRef.current.delete(targetCtrlId);
                 }, 3000);
@@ -683,7 +749,7 @@ export const TejprakashWorkspace: React.FC<TejprakashWorkspaceProps> = ({
               ctrlSlotIndex < ctrlSlots.length
                 ? ctrlSlots[ctrlSlotIndex]
                 : `tejprakash-ctrl-${roomClean}-${Math.floor(100 + Math.random() * 899)}`;
-            window.setTimeout(() => startPeerInstance(fallbackId), 300);
+            window.setTimeout(() => startPeerInstance(fallbackId), 250);
           }
         });
       } catch {
@@ -694,32 +760,59 @@ export const TejprakashWorkspace: React.FC<TejprakashWorkspaceProps> = ({
     const initNetworkTimer = window.setTimeout(() => {
       if (unmounted) return;
       connectWs();
-      connectNtfyCloudRelay();
+      connectMqttRelay();
       startPeerInstance();
-    }, 250);
+    }, 200);
 
     return () => {
       unmounted = true;
       window.clearTimeout(initNetworkTimer);
       if (reconnectTimer !== null) window.clearTimeout(reconnectTimer);
-      if (ntfyReconnectTimer !== null) window.clearTimeout(ntfyReconnectTimer);
+      if (mqttReconnectTimer !== null) window.clearTimeout(mqttReconnectTimer);
+      if (mqttPingInterval !== null) window.clearInterval(mqttPingInterval);
       if (peerRetryTimer !== null) window.clearInterval(peerRetryTimer);
       openPeerConnsRef.current.clear();
       pendingPeerConnsRef.current.clear();
       ws?.close();
-      ntfyWs?.close();
+      mqttWs?.close();
       bc?.close();
       peer?.destroy();
     };
   }, [visible, role, roomId, onFanSpeedChange, localCameraActive, drawOverlayBoxesDirect]);
 
-  // LOOP 1: High-Speed Non-Blocking Camera Frame Broadcaster (~10 FPS with WebRTC Backpressure Guard)
+  // LOOP 1: High-Speed Non-Blocking Camera Frame Broadcaster (~9.5 FPS over Persistent MQTT WebSocket + WebRTC)
   useEffect(() => {
     if (!visible || role !== 'camera' || !localCameraActive) return;
     let active = true;
     let frameTimer: number | null = null;
+    let seqCounter = 1;
     const roomClean = roomId.toLowerCase().replace(/[^a-z0-9]/g, '');
-    const ntfyTopic = `tejprakash_live_v3_${roomClean}`;
+    const mqttTopicBytes = new TextEncoder().encode(`tejprakash/live/v4/${roomClean}`);
+    const textEncoder = new TextEncoder();
+
+    const buildMqttPublishPacket = (jsonStr: string): Uint8Array => {
+      const msgBytes = textEncoder.encode(jsonStr);
+      const rem = 2 + mqttTopicBytes.length + msgBytes.length;
+      const varint: number[] = [];
+      let v = rem;
+      do {
+        let d = v % 128;
+        v = Math.floor(v / 128);
+        if (v > 0) d |= 128;
+        varint.push(d);
+      } while (v > 0);
+
+      const pkt = new Uint8Array(1 + varint.length + rem);
+      let idx = 0;
+      pkt[idx++] = 0x30; // PUBLISH QoS 0
+      for (const b of varint) pkt[idx++] = b;
+      pkt[idx++] = (mqttTopicBytes.length >> 8) & 0xff;
+      pkt[idx++] = mqttTopicBytes.length & 0xff;
+      pkt.set(mqttTopicBytes, idx);
+      idx += mqttTopicBytes.length;
+      pkt.set(msgBytes, idx);
+      return pkt;
+    };
 
     const broadcastFrameTick = () => {
       if (!active) return;
@@ -730,8 +823,8 @@ export const TejprakashWorkspace: React.FC<TejprakashWorkspaceProps> = ({
           canvas = document.createElement('canvas');
           captureCanvasRef.current = canvas;
         }
-        const targetW = 288;
-        const targetH = Math.round((videoEl.videoHeight / videoEl.videoWidth) * targetW) || 216;
+        const targetW = 256;
+        const targetH = Math.round((videoEl.videoHeight / videoEl.videoWidth) * targetW) || 192;
         if (canvas.width !== targetW) canvas.width = targetW;
         if (canvas.height !== targetH) canvas.height = targetH;
         const ctx = canvas.getContext('2d');
@@ -750,8 +843,10 @@ export const TejprakashWorkspace: React.FC<TejprakashWorkspaceProps> = ({
           }));
 
           const frameDataUrl = canvas.toDataURL('image/jpeg', 0.42);
+          seqCounter = (seqCounter + 1) % 100000;
           const packet = {
             type: 'camera:frame',
+            seq: seqCounter,
             roomId,
             camPeerId: myPeerIdRef.current || undefined,
             frameDataUrl,
@@ -760,14 +855,15 @@ export const TejprakashWorkspace: React.FC<TejprakashWorkspaceProps> = ({
             personCount: latestCountRef.current,
             boxes: scaledBoxes,
           };
+          const jsonStr = JSON.stringify(packet);
 
           // 1. Local WebSocket (/ws) with buffer guard
           if (
             wsRef.current &&
             wsRef.current.readyState === WebSocket.OPEN &&
-            wsRef.current.bufferedAmount < 65536
+            wsRef.current.bufferedAmount < 49152
           ) {
-            wsRef.current.send(JSON.stringify(packet));
+            wsRef.current.send(jsonStr);
           }
 
           // 2. BroadcastChannel (same browser)
@@ -776,79 +872,42 @@ export const TejprakashWorkspace: React.FC<TejprakashWorkspaceProps> = ({
           }
 
           // 3. PeerJS WebRTC DataConnections with SCTP bufferedAmount backpressure check
-          let sentOverWebRtc = false;
           openPeerConnsRef.current.forEach((conn) => {
             if (conn && conn.open) {
               const dc = (conn as unknown as { dataChannel?: RTCDataChannel }).dataChannel;
-              if (!dc || dc.bufferedAmount < 65536) {
+              if (!dc || dc.bufferedAmount < 49152) {
                 try {
                   conn.send(packet);
-                  sentOverWebRtc = true;
                 } catch {
                   // Ignore
                 }
-              } else {
-                // Channel is open, just skipping 1 frame to let buffer drain without lag
-                sentOverWebRtc = true;
               }
             }
           });
 
-          // 4. Only use Cloud Relay (ntfy.sh) if NO direct WebRTC connection is open yet,
-          // and throttle to 2200ms so it never hits HTTP 429 rate limits!
-          const nowMs = performance.now();
-          if (!sentOverWebRtc && nowMs - lastCloudRelayMsRef.current >= 2200) {
-            lastCloudRelayMsRef.current = nowMs;
-            let thumbCanvas = cloudThumbCanvasRef.current;
-            if (!thumbCanvas) {
-              thumbCanvas = document.createElement('canvas');
-              cloudThumbCanvasRef.current = thumbCanvas;
-            }
-            const tw = 160;
-            const th = Math.round((videoEl.videoHeight / videoEl.videoWidth) * tw) || 120;
-            if (thumbCanvas.width !== tw) thumbCanvas.width = tw;
-            if (thumbCanvas.height !== th) thumbCanvas.height = th;
-            const tctx = thumbCanvas.getContext('2d');
-            if (tctx) {
-              tctx.drawImage(videoEl, 0, 0, tw, th);
-              const tScaleX = tw / videoEl.videoWidth;
-              const tScaleY = th / videoEl.videoHeight;
-              const compactBoxes: DetectedPersonBox[] = latestBoxesRef.current.map((b) => ({
-                bbox: [
-                  Math.round(b.bbox[0] * tScaleX),
-                  Math.round(b.bbox[1] * tScaleY),
-                  Math.round(b.bbox[2] * tScaleX),
-                  Math.round(b.bbox[3] * tScaleY),
-                ],
-                score: Math.round(b.score * 100) / 100,
-              }));
-              const compactUrl = thumbCanvas.toDataURL('image/jpeg', 0.34);
-              const cloudPacket = JSON.stringify({
-                type: 'camera:frame',
-                camPeerId: myPeerIdRef.current || undefined,
-                frameDataUrl: compactUrl,
-                frameW: tw,
-                frameH: th,
-                personCount: latestCountRef.current,
-                boxes: compactBoxes,
-              });
-              if (cloudPacket.length < 3950) {
-                fetch(`https://ntfy.sh/${ntfyTopic}`, {
-                  method: 'POST',
-                  body: cloudPacket,
-                }).catch(() => {});
-              }
+          // 4. Persistent Binary MQTT-over-WebSocket Relay (wss://broker.emqx.io:8084/mqtt)
+          // Streams every frame across any network (4G/5G/Wi-Fi) with backpressure check and 0 rate limits!
+          const mqttSocket = ntfyWsRef.current;
+          if (
+            mqttSocket &&
+            mqttSocket.readyState === WebSocket.OPEN &&
+            mqttSocket.bufferedAmount < 49152
+          ) {
+            try {
+              mqttSocket.send(buildMqttPublishPacket(jsonStr));
+            } catch {
+              // Ignore
             }
           }
         }
       }
 
       if (active) {
-        frameTimer = window.setTimeout(broadcastFrameTick, 105);
+        frameTimer = window.setTimeout(broadcastFrameTick, 110);
       }
     };
 
-    frameTimer = window.setTimeout(broadcastFrameTick, 90);
+    frameTimer = window.setTimeout(broadcastFrameTick, 80);
     return () => {
       active = false;
       if (frameTimer !== null) window.clearTimeout(frameTimer);

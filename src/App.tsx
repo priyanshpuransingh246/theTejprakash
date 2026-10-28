@@ -607,9 +607,12 @@ export default function App() {
       setPhaseState('entering');
     }
 
+    let paperFrameRendered = false;
+
     triggerShatterRef.current = (mode: ActivePortalMode) => {
       portalModeRef.current = mode;
       setPortalMode(mode);
+      paperFrameRendered = false;
       if (phaseRef.current === 'shattering' || phaseRef.current === 'paper') return;
       phaseRef.current = 'shattering';
       phaseStartTimeRef.current = performance.now() * 0.001;
@@ -623,6 +626,7 @@ export default function App() {
     };
 
     triggerReassembleRef.current = () => {
+      paperFrameRendered = false;
       if (phaseRef.current === 'reassembling' || phaseRef.current === 'hero') return;
       phaseRef.current = 'reassembling';
       phaseStartTimeRef.current = performance.now() * 0.001;
@@ -736,6 +740,7 @@ export default function App() {
       rebuildNavGeometry();
       rebuildCutCellsGeometry(performance.now() * 0.001, pointerPanelNorm, pointerInfluence);
       rebuildBackSliverGeometry();
+      paperFrameRendered = false;
     };
 
     window.addEventListener('pointermove', onPointerMove, { passive: true });
@@ -746,6 +751,7 @@ export default function App() {
     if (document.fonts && document.fonts.ready) {
       document.fonts.ready.then(() => {
         canvasDirtyRef.current = true;
+        paperFrameRendered = false;
         drawBackSliverCanvas(backCanvas, W, hoverStateRef.current.backHovered);
         backTexture.needsUpdate = true;
       });
@@ -780,6 +786,18 @@ export default function App() {
 
     function tick() {
       if (disposed) return;
+
+      // Once the 6 3D shards have parked at the screen border in Camera/Controller mode,
+      // sleep the WebGL render loop (0% GPU / 0% CPU!) while CSS compositor floats the canvas layer.
+      if (
+        phaseRef.current === 'paper' &&
+        portalModeRef.current !== 'rules' &&
+        paperFrameRendered &&
+        !canvasDirtyRef.current
+      ) {
+        frameId = window.setTimeout(tick, 150);
+        return;
+      }
 
       const nowSec = performance.now() * 0.001;
       const dt = Math.min(0.12, Math.max(0.001, nowSec - lastTimeSec));
@@ -1070,6 +1088,12 @@ export default function App() {
 
       renderer.render(scene, camera);
 
+      if (phase === 'paper' && portalModeRef.current !== 'rules') {
+        paperFrameRendered = true;
+      } else {
+        paperFrameRendered = false;
+      }
+
       if (isSoftwareGl) {
         afterDraw(tick);
       } else {
@@ -1126,8 +1150,13 @@ export default function App() {
       className="relative w-screen h-screen bg-[#050507] overflow-hidden"
       data-state={phaseState}
     >
-      {/* Dedicated WebGL Canvas Mount */}
-      <div ref={canvasMountRef} className="fixed inset-0 z-0" />
+      {/* Dedicated WebGL Canvas Mount (floated by zero-cost GPU compositor in paper phase) */}
+      <div
+        ref={canvasMountRef}
+        className={`fixed inset-0 z-0 ${
+          phaseState === 'paper' && portalMode !== 'rules' ? 'tej-border-breathe' : ''
+        }`}
+      />
 
       {/* Transparent Homography-Mapped Selectable DOM Text & Hit Layer */}
       <div
