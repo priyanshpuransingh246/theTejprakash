@@ -1,5 +1,5 @@
 import React, { useEffect, useRef, useState, useCallback } from 'react';
-import Peer, { DataConnection, MediaConnection } from 'peerjs';
+import Peer, { DataConnection } from 'peerjs';
 import {
   ARDUINO_INO_CODE,
   computeAiFanDecision,
@@ -44,11 +44,12 @@ export interface TejprakashWorkspaceProps {
 const DEFAULT_ROOM_ID = 'TEJ-108';
 
 // Reusable Smoked-Glass Slab class matching the WebGL Landing Hero's #17171b extruded glass
+// Note: No backdrop-filter on parent slabs so Chrome/Android hardware <video> overlay never blacks out!
 const GLASS_SLAB_CLASS =
-  'relative rounded-[20px] bg-[#16161b]/88 backdrop-blur-2xl border border-white/[0.11] shadow-[inset_0_1px_0_0_rgba(255,255,255,0.20),inset_1px_0_0_0_rgba(255,255,255,0.08),0_24px_60px_rgba(0,0,0,0.78)]';
+  'relative rounded-[20px] bg-[#141418]/95 border border-white/[0.11] shadow-[inset_0_1px_0_0_rgba(255,255,255,0.20),inset_1px_0_0_0_rgba(255,255,255,0.08),0_24px_60px_rgba(0,0,0,0.82)]';
 
 const GLASS_SUBSLAB_CLASS =
-  'relative rounded-[14px] bg-[#0d0d11]/90 border border-white/[0.08] shadow-[inset_0_1px_0_0_rgba(255,255,255,0.10)]';
+  'relative rounded-[14px] bg-[#0c0c10]/95 border border-white/[0.08] shadow-[inset_0_1px_0_0_rgba(255,255,255,0.10)]';
 
 export const TejprakashWorkspace: React.FC<TejprakashWorkspaceProps> = ({
   visible,
@@ -73,7 +74,6 @@ export const TejprakashWorkspace: React.FC<TejprakashWorkspaceProps> = ({
   // Remote camera frame received from Smartphone Camera Node
   const [remoteFrameUrl, setRemoteFrameUrl] = useState<string | null>(null);
   const [remoteCameraOnline, setRemoteCameraOnline] = useState(false);
-  const [remoteStreamActive, setRemoteStreamActive] = useState(false);
 
   // AI Person Detection State
   const [aiModelLoaded, setAiModelLoaded] = useState(false);
@@ -101,12 +101,13 @@ export const TejprakashWorkspace: React.FC<TejprakashWorkspaceProps> = ({
 
   // Refs for media, canvas, WebSocket, PeerJS, and Serial
   const localVideoRef = useRef<HTMLVideoElement | null>(null);
-  const remoteVideoRef = useRef<HTMLVideoElement | null>(null);
   const remoteImgRef = useRef<HTMLImageElement | null>(null);
   const overlayCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const captureCanvasRef = useRef<HTMLCanvasElement | null>(null);
+  const aiDetectCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const cloudThumbCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const mediaStreamRef = useRef<MediaStream | null>(null);
+  const isStartingCameraRef = useRef<boolean>(false);
 
   const wsRef = useRef<WebSocket | null>(null);
   const ntfyWsRef = useRef<WebSocket | null>(null);
@@ -114,7 +115,6 @@ export const TejprakashWorkspace: React.FC<TejprakashWorkspaceProps> = ({
   const peerRef = useRef<Peer | null>(null);
   const peerConnRef = useRef<DataConnection | null>(null);
   const openPeerConnsRef = useRef<Map<string, DataConnection>>(new Map());
-  const mediaCallRef = useRef<MediaConnection | null>(null);
   const myPeerIdRef = useRef<string>('');
   const latestCountRef = useRef<number>(0);
   const latestBoxesRef = useRef<DetectedPersonBox[]>([]);
@@ -128,8 +128,7 @@ export const TejprakashWorkspace: React.FC<TejprakashWorkspaceProps> = ({
     setRole(initialRole);
   }, [initialRole]);
 
-  const hasActiveVisionInput =
-    localCameraActive || remoteStreamActive || Boolean(remoteFrameUrl);
+  const hasActiveVisionInput = localCameraActive || Boolean(remoteFrameUrl);
 
   // Load COCO-SSD AI person detection model on demand when a camera feed is active
   useEffect(() => {
@@ -229,13 +228,32 @@ export const TejprakashWorkspace: React.FC<TejprakashWorkspaceProps> = ({
     }
   };
 
-  // Start or stop local camera
+  // Start or stop local camera (with lock & keepalive so tracks never get stopped after 1-2s)
   const startLocalCamera = useCallback(
-    async (preferredFacing: 'environment' | 'user' = facingMode) => {
+    async (preferredFacing: 'environment' | 'user' = facingMode, forceRestart = false) => {
+      if (isStartingCameraRef.current) return;
+      if (
+        !forceRestart &&
+        mediaStreamRef.current &&
+        mediaStreamRef.current.active &&
+        mediaStreamRef.current.getVideoTracks().some((t) => t.readyState === 'live')
+      ) {
+        if (localVideoRef.current) {
+          if (localVideoRef.current.srcObject !== mediaStreamRef.current) {
+            localVideoRef.current.srcObject = mediaStreamRef.current;
+          }
+          localVideoRef.current.play().catch(() => {});
+        }
+        setLocalCameraActive(true);
+        return;
+      }
+
+      isStartingCameraRef.current = true;
       setCameraError(null);
       try {
         if (mediaStreamRef.current) {
           mediaStreamRef.current.getTracks().forEach((t) => t.stop());
+          mediaStreamRef.current = null;
         }
         if (!navigator.mediaDevices?.getUserMedia) {
           throw new Error('Camera permission requires HTTPS or localhost');
@@ -258,21 +276,25 @@ export const TejprakashWorkspace: React.FC<TejprakashWorkspaceProps> = ({
         }
 
         mediaStreamRef.current = stream;
+        setLocalCameraActive(true);
+
         if (localVideoRef.current) {
           localVideoRef.current.srcObject = stream;
           await localVideoRef.current.play().catch(() => {});
         }
-        setLocalCameraActive(true);
       } catch (err) {
         const msg = err instanceof Error ? err.message : 'Camera permission denied';
         setCameraError(msg);
         setLocalCameraActive(false);
+      } finally {
+        isStartingCameraRef.current = false;
       }
     },
     [facingMode]
   );
 
   const stopLocalCamera = useCallback(() => {
+    isStartingCameraRef.current = false;
     if (mediaStreamRef.current) {
       mediaStreamRef.current.getTracks().forEach((t) => t.stop());
       mediaStreamRef.current = null;
@@ -286,13 +308,33 @@ export const TejprakashWorkspace: React.FC<TejprakashWorkspaceProps> = ({
     }
   }, [role, roomId]);
 
+  // Keep localVideoRef attached and playing whenever localCameraActive or role changes
+  useEffect(() => {
+    if (!localCameraActive || !mediaStreamRef.current) return;
+    const ensureVideoPlaying = () => {
+      const videoEl = localVideoRef.current;
+      const stream = mediaStreamRef.current;
+      if (videoEl && stream) {
+        if (videoEl.srcObject !== stream) {
+          videoEl.srcObject = stream;
+        }
+        if (videoEl.paused) {
+          videoEl.play().catch(() => {});
+        }
+      }
+    };
+    ensureVideoPlaying();
+    const keepAliveId = window.setInterval(ensureVideoPlaying, 750);
+    return () => window.clearInterval(keepAliveId);
+  }, [localCameraActive, role, visible]);
+
   useEffect(() => {
     if (!visible) return;
     const timer = window.setTimeout(() => {
-      if (role === 'camera' && !localCameraActive) {
-        startLocalCamera(facingMode);
+      if (role === 'camera' && !localCameraActive && !isStartingCameraRef.current) {
+        startLocalCamera(facingMode, false);
       }
-    }, 920);
+    }, 350);
     return () => window.clearTimeout(timer);
   }, [visible, role, localCameraActive, facingMode, startLocalCamera]);
 
@@ -532,13 +574,6 @@ export const TejprakashWorkspace: React.FC<TejprakashWorkspaceProps> = ({
                 // Ignore
               }
             }
-            if (mediaStreamRef.current && (!mediaCallRef.current || !mediaCallRef.current.open)) {
-              try {
-                mediaCallRef.current = peer.call(targetCtrlId, mediaStreamRef.current);
-              } catch {
-                // Ignore
-              }
-            }
           }
         };
 
@@ -553,18 +588,6 @@ export const TejprakashWorkspace: React.FC<TejprakashWorkspaceProps> = ({
 
         peer.on('connection', (conn) => {
           setupDataConn(conn);
-        });
-
-        peer.on('call', (call) => {
-          call.answer();
-          call.on('stream', (remoteStream) => {
-            if (remoteVideoRef.current) {
-              remoteVideoRef.current.srcObject = remoteStream;
-              remoteVideoRef.current.play().catch(() => {});
-              setRemoteStreamActive(true);
-              setRemoteCameraOnline(true);
-            }
-          });
         });
 
         peer.on('error', (err: { type?: string }) => {
@@ -588,7 +611,7 @@ export const TejprakashWorkspace: React.FC<TejprakashWorkspaceProps> = ({
       connectWs();
       connectNtfyCloudRelay();
       startPeerInstance();
-    }, 550);
+    }, 350);
 
     return () => {
       unmounted = true;
@@ -604,12 +627,11 @@ export const TejprakashWorkspace: React.FC<TejprakashWorkspaceProps> = ({
     };
   }, [visible, role, roomId, onFanSpeedChange]);
 
-  // Immediately initiate PeerJS call/connect as soon as local camera stream turns on
+  // Immediately initiate PeerJS data connection as soon as local camera turns on
   useEffect(() => {
     if (
       role === 'camera' &&
       localCameraActive &&
-      mediaStreamRef.current &&
       peerRef.current &&
       !peerRef.current.disconnected
     ) {
@@ -621,7 +643,6 @@ export const TejprakashWorkspace: React.FC<TejprakashWorkspaceProps> = ({
       ];
       for (const targetCtrlId of ctrlSlots) {
         try {
-          mediaCallRef.current = peerRef.current.call(targetCtrlId, mediaStreamRef.current);
           if (!openPeerConnsRef.current.has(targetCtrlId)) {
             const conn = peerRef.current.connect(targetCtrlId, { reliable: true });
             conn.on('open', () => {
@@ -759,7 +780,8 @@ export const TejprakashWorkspace: React.FC<TejprakashWorkspaceProps> = ({
     };
   }, [visible, role, localCameraActive, roomId]);
 
-  // LOOP 2: Asynchronous AI Person Detection Loop (Runs in background without blocking video streaming)
+  // LOOP 2: Asynchronous AI Person Detection Loop
+  // IMPORTANT: Copies <video> to an offscreen 2D <canvas> before passing to TensorFlow.js so TF WebGL NEVER hijacks or blacks out the hardware <video> element!
   useEffect(() => {
     if (!visible) return;
     let active = true;
@@ -768,23 +790,31 @@ export const TejprakashWorkspace: React.FC<TejprakashWorkspaceProps> = ({
     const detectionLoop = async () => {
       if (!active) return;
 
-      const videoEl = localCameraActive
-        ? localVideoRef.current
-        : remoteStreamActive
-        ? remoteVideoRef.current
-        : null;
+      const videoEl = localCameraActive ? localVideoRef.current : null;
 
       if (videoEl && videoEl.readyState >= 2 && videoEl.videoWidth > 0) {
-        const { count, boxes } = await detectPersonsInElement(videoEl, 0.4);
-        if (!active) return;
-        latestCountRef.current = count;
-        latestBoxesRef.current = boxes;
-        setRawDetectedCount(count);
-        setDetectedBoxes(boxes);
+        let aiCanvas = aiDetectCanvasRef.current;
+        if (!aiCanvas) {
+          aiCanvas = document.createElement('canvas');
+          aiDetectCanvasRef.current = aiCanvas;
+        }
+        const vw = videoEl.videoWidth;
+        const vh = videoEl.videoHeight;
+        aiCanvas.width = vw;
+        aiCanvas.height = vh;
+        const actx = aiCanvas.getContext('2d');
+        if (actx) {
+          actx.drawImage(videoEl, 0, 0, vw, vh);
+          const { count, boxes } = await detectPersonsInElement(aiCanvas, 0.4);
+          if (!active) return;
+          latestCountRef.current = count;
+          latestBoxesRef.current = boxes;
+          setRawDetectedCount(count);
+          setDetectedBoxes(boxes);
+        }
       } else if (
         role === 'controller' &&
         !localCameraActive &&
-        !remoteStreamActive &&
         remoteFrameUrl &&
         remoteImgRef.current &&
         remoteImgRef.current.complete &&
@@ -800,16 +830,16 @@ export const TejprakashWorkspace: React.FC<TejprakashWorkspaceProps> = ({
       }
 
       if (active) {
-        timerId = window.setTimeout(detectionLoop, 380);
+        timerId = window.setTimeout(detectionLoop, 420);
       }
     };
 
-    timerId = window.setTimeout(detectionLoop, 400);
+    timerId = window.setTimeout(detectionLoop, 450);
     return () => {
       active = false;
       if (timerId !== null) window.clearTimeout(timerId);
     };
-  }, [visible, localCameraActive, remoteStreamActive, remoteFrameUrl, role]);
+  }, [visible, localCameraActive, remoteFrameUrl, role]);
 
   // Draw AI person detection bounding boxes onto overlayCanvasRef
   useEffect(() => {
@@ -823,9 +853,6 @@ export const TejprakashWorkspace: React.FC<TejprakashWorkspaceProps> = ({
     if (localCameraActive && localVideoRef.current && localVideoRef.current.videoWidth > 0) {
       srcW = localVideoRef.current.videoWidth;
       srcH = localVideoRef.current.videoHeight;
-    } else if (remoteStreamActive && remoteVideoRef.current && remoteVideoRef.current.videoWidth > 0) {
-      srcW = remoteVideoRef.current.videoWidth;
-      srcH = remoteVideoRef.current.videoHeight;
     } else if (remoteImgRef.current && remoteImgRef.current.naturalWidth > 0) {
       srcW = remoteImgRef.current.naturalWidth;
       srcH = remoteImgRef.current.naturalHeight;
@@ -852,7 +879,7 @@ export const TejprakashWorkspace: React.FC<TejprakashWorkspaceProps> = ({
       ctx.fillStyle = '#36d67e';
       ctx.fillText(label, x + 7, Math.max(16, y - 9));
     }
-  }, [detectedBoxes, localCameraActive, remoteStreamActive, remoteFrameUrl]);
+  }, [detectedBoxes, localCameraActive, remoteFrameUrl]);
 
   // Stabilize person count over 850ms so single-frame flicker never jerks the motors
   useEffect(() => {
@@ -950,11 +977,10 @@ export const TejprakashWorkspace: React.FC<TejprakashWorkspaceProps> = ({
   };
 
   const workspaceRootRef = useRef<HTMLDivElement | null>(null);
-  const workspaceStageRef = useRef<HTMLDivElement | null>(null);
 
   if (!visible) return null;
 
-  const hasAnyVideoFeed = localCameraActive || remoteStreamActive || Boolean(remoteFrameUrl);
+  const hasAnyVideoFeed = localCameraActive || Boolean(remoteFrameUrl);
 
   const renderAnimatedTurbine = (speed: number, accentHex: string) => {
     const isSpinning = speed > 0;
@@ -1004,15 +1030,8 @@ export const TejprakashWorkspace: React.FC<TejprakashWorkspaceProps> = ({
       ref={workspaceRootRef}
       data-testid="tejprakash-workspace"
       onPointerMove={(e) => {
-        const w = window.innerWidth || 1440;
-        const h = window.innerHeight || 960;
-        const nx = (e.clientX / w - 0.5) * 2;
-        const ny = (e.clientY / h - 0.5) * 2;
         if (workspaceRootRef.current) {
           workspaceRootRef.current.style.backgroundImage = `radial-gradient(560px circle at ${e.clientX}px ${e.clientY}px, rgba(185, 174, 232, 0.11), rgba(54, 214, 126, 0.05) 42%, transparent 75%), radial-gradient(circle at 50% 50%, rgba(5, 5, 7, 0.52) 0%, rgba(5, 5, 7, 0.14) 68%, transparent 100%)`;
-        }
-        if (workspaceStageRef.current) {
-          workspaceStageRef.current.style.transform = `perspective(1600px) rotateX(${(-ny * 1.15).toFixed(2)}deg) rotateY(${(nx * 1.35).toFixed(2)}deg)`;
         }
       }}
       className="fixed inset-0 z-30 bg-transparent text-[#ededf0] overflow-y-auto select-text font-sans"
@@ -1021,10 +1040,7 @@ export const TejprakashWorkspace: React.FC<TejprakashWorkspaceProps> = ({
           'radial-gradient(560px circle at 50% 50%, rgba(185, 174, 232, 0.10), rgba(54, 214, 126, 0.05) 42%, transparent 75%), radial-gradient(circle at 50% 50%, rgba(5, 5, 7, 0.52) 0%, rgba(5, 5, 7, 0.14) 68%, transparent 100%)',
       }}
     >
-      <div
-        ref={workspaceStageRef}
-        className="max-w-[1220px] mx-auto px-6 sm:px-14 py-6 sm:py-8 space-y-4 sm:space-y-5 transition-transform duration-150 ease-out will-change-transform"
-      >
+      <div className="max-w-[1220px] mx-auto px-6 sm:px-14 py-6 sm:py-8 space-y-4 sm:space-y-5">
         {/* ====================================================================
          * TOP SMOKED-GLASS NAV SLAB (Mirrors the Landing Hero's Nav Slab)
          * ==================================================================== */}
@@ -1129,89 +1145,88 @@ export const TejprakashWorkspace: React.FC<TejprakashWorkspaceProps> = ({
                 </div>
 
                 <div className="flex items-center gap-2.5">
-                  <button
-                    type="button"
-                    onClick={() => {
-                      const next = facingMode === 'environment' ? 'user' : 'environment';
-                      setFacingMode(next);
-                      startLocalCamera(next);
-                    }}
-                    className="px-4 py-2 rounded-[7px] bg-white/[0.07] hover:bg-white/[0.14] border border-white/[0.20] text-xs font-medium text-white/90 cursor-pointer transition-all"
-                  >
-                    Flip ({facingMode === 'environment' ? 'Rear' : 'Front'})
-                  </button>
-
-                  {localCameraActive ? (
                     <button
                       type="button"
-                      onClick={stopLocalCamera}
-                      className="px-4 py-2 rounded-[7px] bg-rose-500/15 hover:bg-rose-500/25 border border-rose-400/35 text-xs font-medium text-rose-200 cursor-pointer transition-all"
+                      onClick={() => {
+                        const next = facingMode === 'environment' ? 'user' : 'environment';
+                        setFacingMode(next);
+                        startLocalCamera(next, true);
+                      }}
+                      className="px-4 py-2 rounded-[7px] bg-white/[0.07] hover:bg-white/[0.14] border border-white/[0.20] text-xs font-medium text-white/90 cursor-pointer transition-all"
                     >
-                      Pause Stream
+                      Flip ({facingMode === 'environment' ? 'Rear' : 'Front'})
                     </button>
-                  ) : (
-                    <button
-                      type="button"
-                      onClick={() => startLocalCamera(facingMode)}
-                      className="px-4 py-2 rounded-[7px] bg-[#ededf0] hover:bg-[#36d67e] text-[#09090c] font-medium text-xs cursor-pointer transition-all"
-                    >
-                      Enable Camera
-                    </button>
-                  )}
-                </div>
-              </div>
 
-              {/* Camera Viewport inside Recessed Glass Frame */}
-              <div className="relative w-full aspect-video rounded-[16px] overflow-hidden bg-[#050507] border border-white/[0.12] shadow-[inset_0_2px_20px_rgba(0,0,0,0.9)] flex items-center justify-center">
-                {/* Ambient Optical Grid, Sweeping Laser Beam & Corner Reticles */}
-                <div
-                  className="pointer-events-none absolute inset-0 opacity-20"
-                  style={{
-                    backgroundImage:
-                      'linear-gradient(to right, rgba(255,255,255,0.06) 1px, transparent 1px), linear-gradient(to bottom, rgba(255,255,255,0.06) 1px, transparent 1px)',
-                    backgroundSize: '36px 36px',
-                  }}
-                />
-                <div className="tej-scan-beam pointer-events-none absolute inset-x-0 h-[2px] bg-gradient-to-r from-transparent via-[#36d67e]/75 to-transparent shadow-[0_0_16px_rgba(54,214,126,0.75)]" />
-                <div className="pointer-events-none absolute top-3 left-3 w-4 h-4 border-t-2 border-l-2 border-[#36d67e]/50 rounded-tl-[4px]" />
-                <div className="pointer-events-none absolute top-3 right-3 w-4 h-4 border-t-2 border-r-2 border-[#36d67e]/50 rounded-tr-[4px]" />
-                <div className="pointer-events-none absolute bottom-3 left-3 w-4 h-4 border-b-2 border-l-2 border-[#36d67e]/50 rounded-bl-[4px]" />
-                <div className="pointer-events-none absolute bottom-3 right-3 w-4 h-4 border-b-2 border-r-2 border-[#36d67e]/50 rounded-br-[4px]" />
-
-                <video
-                  ref={localVideoRef}
-                  playsInline
-                  muted
-                  autoPlay
-                  className={`w-full h-full object-cover ${localCameraActive ? 'block' : 'hidden'}`}
-                />
-                <canvas
-                  ref={overlayCanvasRef}
-                  className={`absolute inset-0 w-full h-full object-cover pointer-events-none ${
-                    localCameraActive ? 'block' : 'hidden'
-                  }`}
-                />
-
-                {!localCameraActive && (
-                  <div className="relative z-10 text-center p-6 max-w-md space-y-3">
-                    <p className="text-sm text-white/75 font-normal leading-relaxed m-0">
-                      Grant camera permission on this device to stream live classroom video and AI occupancy count directly to the Controller.
-                    </p>
-                    {cameraError && (
-                      <p className="text-xs text-rose-400 m-0">{cameraError}</p>
+                    {localCameraActive ? (
+                      <button
+                        type="button"
+                        onClick={stopLocalCamera}
+                        className="px-4 py-2 rounded-[7px] bg-rose-500/15 hover:bg-rose-500/25 border border-rose-400/35 text-xs font-medium text-rose-200 cursor-pointer transition-all"
+                      >
+                        Pause Stream
+                      </button>
+                    ) : (
+                      <button
+                        type="button"
+                        onClick={() => startLocalCamera(facingMode, true)}
+                        className="px-4 py-2 rounded-[7px] bg-[#ededf0] hover:bg-[#36d67e] text-[#09090c] font-medium text-xs cursor-pointer transition-all"
+                      >
+                        Enable Camera
+                      </button>
                     )}
-                    <button
-                      type="button"
-                      onClick={() => startLocalCamera(facingMode)}
-                      className="px-5 py-2.5 rounded-[7px] bg-[#ededf0] hover:bg-[#36d67e] text-[#09090c] font-medium text-xs cursor-pointer transition-all"
-                    >
-                      Grant Camera Permission
-                    </button>
                   </div>
-                )}
+                </div>
 
-                {/* Glass HUD Pills */}
-                <div className="absolute top-3.5 left-3.5 flex items-center gap-2 bg-[#141418]/85 backdrop-blur-md px-3.5 py-1.5 rounded-full border border-white/[0.15]">
+                {/* Camera Viewport inside Recessed Glass Frame */}
+                <div className="relative w-full aspect-video rounded-[16px] overflow-hidden bg-[#050507] border border-white/[0.12] shadow-[inset_0_2px_20px_rgba(0,0,0,0.9)] flex items-center justify-center">
+                  {/* Ambient Optical Grid (only visible when camera is off) */}
+                  {!localCameraActive && (
+                    <div
+                      className="pointer-events-none absolute inset-0 opacity-20"
+                      style={{
+                        backgroundImage:
+                          'linear-gradient(to right, rgba(255,255,255,0.06) 1px, transparent 1px), linear-gradient(to bottom, rgba(255,255,255,0.06) 1px, transparent 1px)',
+                        backgroundSize: '36px 36px',
+                      }}
+                    />
+                  )}
+
+                  <video
+                    ref={localVideoRef}
+                    playsInline
+                    muted
+                    autoPlay
+                    className={`relative z-10 w-full h-full object-cover transition-opacity duration-150 ${
+                      localCameraActive ? 'opacity-100' : 'opacity-0 pointer-events-none'
+                    }`}
+                  />
+                  <canvas
+                    ref={overlayCanvasRef}
+                    className={`absolute inset-0 z-20 w-full h-full object-cover pointer-events-none ${
+                      localCameraActive ? 'opacity-100' : 'opacity-0'
+                    }`}
+                  />
+
+                  {!localCameraActive && (
+                    <div className="absolute inset-0 z-20 flex flex-col items-center justify-center text-center p-6 max-w-md mx-auto space-y-3">
+                      <p className="text-sm text-white/75 font-normal leading-relaxed m-0">
+                        Grant camera permission on this device to stream live classroom video and AI occupancy count directly to the Controller.
+                      </p>
+                      {cameraError && (
+                        <p className="text-xs text-rose-400 m-0">{cameraError}</p>
+                      )}
+                      <button
+                        type="button"
+                        onClick={() => startLocalCamera(facingMode, true)}
+                        className="px-5 py-2.5 rounded-[7px] bg-[#ededf0] hover:bg-[#36d67e] text-[#09090c] font-medium text-xs cursor-pointer transition-all"
+                      >
+                        Grant Camera Permission
+                      </button>
+                    </div>
+                  )}
+
+                  {/* Glass HUD Pills */}
+                  <div className="absolute top-3.5 left-3.5 z-30 flex items-center gap-2 bg-[#141418]/90 px-3.5 py-1.5 rounded-full border border-white/[0.15]">
                   <span
                     className={`w-2 h-2 rounded-full ${
                       localCameraActive ? 'bg-[#36d67e] animate-pulse' : 'bg-white/35'
@@ -1337,7 +1352,7 @@ export const TejprakashWorkspace: React.FC<TejprakashWorkspaceProps> = ({
                         <button
                           type="button"
                           data-testid="controller-start-cam-btn"
-                          onClick={() => startLocalCamera('user')}
+                          onClick={() => startLocalCamera('user', true)}
                           className="px-3.5 py-2 rounded-[7px] bg-white/[0.08] hover:bg-[#36d67e]/20 border border-white/[0.22] hover:border-[#36d67e] text-xs font-medium text-white/90 hover:text-[#36d67e] cursor-pointer transition-all"
                         >
                           Use Device Camera
@@ -1356,59 +1371,45 @@ export const TejprakashWorkspace: React.FC<TejprakashWorkspaceProps> = ({
 
                   {/* Video / Remote Stream Stage */}
                   <div className="relative w-full aspect-video rounded-[16px] overflow-hidden bg-[#050507] border border-white/[0.12] shadow-[inset_0_2px_24px_rgba(0,0,0,0.92)] flex items-center justify-center">
-                    {/* Subtle Optical Sensor Grid, Sweeping Laser Beam & Corner Reticles */}
-                    <div
-                      className="pointer-events-none absolute inset-0 opacity-20"
-                      style={{
-                        backgroundImage:
-                          'linear-gradient(to right, rgba(255,255,255,0.06) 1px, transparent 1px), linear-gradient(to bottom, rgba(255,255,255,0.06) 1px, transparent 1px)',
-                        backgroundSize: '36px 36px',
-                      }}
-                    />
-                    <div className="tej-scan-beam pointer-events-none absolute inset-x-0 h-[2px] bg-gradient-to-r from-transparent via-[#36d67e]/75 to-transparent shadow-[0_0_16px_rgba(54,214,126,0.75)]" />
-                    <div className="pointer-events-none absolute top-3 left-3 w-4 h-4 border-t-2 border-l-2 border-[#36d67e]/50 rounded-tl-[4px]" />
-                    <div className="pointer-events-none absolute top-3 right-3 w-4 h-4 border-t-2 border-r-2 border-[#36d67e]/50 rounded-tr-[4px]" />
-                    <div className="pointer-events-none absolute bottom-3 left-3 w-4 h-4 border-b-2 border-l-2 border-[#36d67e]/50 rounded-bl-[4px]" />
-                    <div className="pointer-events-none absolute bottom-3 right-3 w-4 h-4 border-b-2 border-r-2 border-[#36d67e]/50 rounded-br-[4px]" />
+                    {!hasAnyVideoFeed && (
+                      <div
+                        className="pointer-events-none absolute inset-0 opacity-20"
+                        style={{
+                          backgroundImage:
+                            'linear-gradient(to right, rgba(255,255,255,0.06) 1px, transparent 1px), linear-gradient(to bottom, rgba(255,255,255,0.06) 1px, transparent 1px)',
+                          backgroundSize: '36px 36px',
+                        }}
+                      />
+                    )}
 
                     <video
                       ref={localVideoRef}
                       playsInline
                       muted
                       autoPlay
-                      className={`w-full h-full object-cover ${
-                        localCameraActive ? 'block' : 'hidden'
+                      className={`relative z-10 w-full h-full object-cover transition-opacity duration-150 ${
+                        localCameraActive ? 'opacity-100' : 'opacity-0 pointer-events-none'
                       }`}
                     />
 
-                    <video
-                      ref={remoteVideoRef}
-                      playsInline
-                      muted
-                      autoPlay
-                      className={`w-full h-full object-cover ${
-                        !localCameraActive && remoteStreamActive ? 'block' : 'hidden'
-                      }`}
-                    />
-
-                    {!localCameraActive && !remoteStreamActive && remoteFrameUrl && (
+                    {!localCameraActive && remoteFrameUrl && (
                       <img
                         ref={remoteImgRef}
                         src={remoteFrameUrl}
                         alt="Live Smartphone Classroom Feed"
-                        className="w-full h-full object-cover block"
+                        className="absolute inset-0 z-10 w-full h-full object-cover block"
                       />
                     )}
 
                     <canvas
                       ref={overlayCanvasRef}
-                      className={`absolute inset-0 w-full h-full object-cover pointer-events-none ${
-                        hasAnyVideoFeed ? 'block' : 'hidden'
+                      className={`absolute inset-0 z-20 w-full h-full object-cover pointer-events-none ${
+                        hasAnyVideoFeed ? 'opacity-100' : 'opacity-0'
                       }`}
                     />
 
                     {!hasAnyVideoFeed && (
-                      <div className="relative z-10 text-center p-6 max-w-md space-y-3.5">
+                      <div className="absolute inset-0 z-20 flex flex-col items-center justify-center text-center p-6 max-w-md mx-auto space-y-3.5">
                         <div className="inline-flex items-center gap-2 px-3.5 py-1 rounded-full bg-white/[0.05] border border-white/[0.12] text-[11px] text-white/70">
                           <span className="w-2 h-2 rounded-full bg-[#b9aee8] animate-ping" />
                           Awaiting Smartphone Camera Node...
@@ -1422,7 +1423,7 @@ export const TejprakashWorkspace: React.FC<TejprakashWorkspaceProps> = ({
                         <div className="pt-1">
                           <button
                             type="button"
-                            onClick={() => startLocalCamera('user')}
+                            onClick={() => startLocalCamera('user', true)}
                             className="px-5 py-2.5 rounded-[7px] bg-[#ededf0] hover:bg-[#36d67e] text-[#09090c] font-medium text-xs cursor-pointer transition-all"
                           >
                             Activate Camera Feed
@@ -1432,7 +1433,7 @@ export const TejprakashWorkspace: React.FC<TejprakashWorkspaceProps> = ({
                     )}
 
                     {/* Top-Left Source Pill */}
-                    <div className="absolute top-3.5 left-3.5 bg-[#141418]/85 backdrop-blur-md px-3.5 py-1.5 rounded-full border border-white/[0.15] flex items-center gap-2">
+                    <div className="absolute top-3.5 left-3.5 z-30 bg-[#141418]/90 px-3.5 py-1.5 rounded-full border border-white/[0.15] flex items-center gap-2">
                       <span
                         className={`w-2 h-2 rounded-full ${
                           hasAnyVideoFeed ? 'bg-[#36d67e] animate-pulse' : 'bg-white/35'
@@ -1450,7 +1451,7 @@ export const TejprakashWorkspace: React.FC<TejprakashWorkspaceProps> = ({
                     {/* Top-Right Occupancy Pill */}
                     <div
                       data-testid="live-person-count-badge"
-                      className="absolute top-3.5 right-3.5 bg-[#141418]/90 backdrop-blur-md px-3.5 py-1.5 rounded-full border border-[#36d67e]/50"
+                      className="absolute top-3.5 right-3.5 z-30 bg-[#141418]/90 px-3.5 py-1.5 rounded-full border border-[#36d67e]/50"
                     >
                       <span className="text-xs font-medium text-[#36d67e]">
                         Detected: {effectivePersonCount} {effectivePersonCount === 1 ? 'Person' : 'Persons'}
